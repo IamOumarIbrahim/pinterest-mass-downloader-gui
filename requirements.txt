@@ -1,0 +1,3 @@
+pinterest-dl>=1.3.0
+requests
+Pillow

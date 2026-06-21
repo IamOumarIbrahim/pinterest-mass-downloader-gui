@@ -430,6 +430,9 @@ class PinterestDownloaderApp(tk.Tk):
         self._progress_q = queue.Queue()
         self._running    = False
         self._start_time = 0.0
+        self._parent_folder = None
+        self._queue_items = []
+        self._current_queue_index = 0
 
         self._build_ui()
         self._poll_queues()
@@ -514,9 +517,15 @@ class PinterestDownloaderApp(tk.Tk):
 
         query_card = tk.Frame(parent, bg=BG_CARD)
         query_card.pack(fill="x", pady=2)
+        query_inner = tk.Frame(query_card, bg=BG_CARD)
+        query_inner.pack(fill="x", padx=14, pady=10)
         self._query_entry = StyledEntry(
-            query_card, placeholder="Enter keywords or board URL…")
-        self._query_entry.pack(fill="x", padx=14, pady=12, ipady=7)
+            query_inner, placeholder="Enter keywords or board URL…")
+        self._query_entry.pack(side="left", fill="x", expand=True, ipady=6)
+        self._query_entry.bind("<Return>", lambda _: self._add_to_queue())
+        StyledButton(query_inner, "+ Queue",
+                     command=self._add_to_queue,
+                     style="accent").pack(side="left", padx=(8, 0))
 
         # ── Save folder ───────────────────────────────────────────────────
         self._section_label(parent, "SAVE", "Download Folder")
@@ -540,6 +549,10 @@ class PinterestDownloaderApp(tk.Tk):
         StyledButton(folder_inner, "Browse…",
                      command=self._browse_folder,
                      style="ghost").pack(side="left", padx=(8, 0))
+        self._parent_btn = StyledButton(folder_inner, "Parent Folder",
+                                        command=self._browse_parent_folder,
+                                        style="ghost")
+        self._parent_btn.pack(side="left", padx=(8, 0))
 
         # ── Per-type count sliders ─────────────────────────────────────────
         self._section_label(parent, "COUNT", "Items per Media Type")
@@ -606,7 +619,14 @@ class PinterestDownloaderApp(tk.Tk):
                      style="ghost").pack(side="left", padx=(8, 0), ipady=5)
 
     def _build_console(self, parent):
-        hdr = tk.Frame(parent, bg=BG_DARK)
+        paned = tk.PanedWindow(parent, orient="vertical", bg=BG_DARK, bd=0, sashwidth=6, sashrelief="flat")
+        paned.pack(fill="both", expand=True)
+
+        # ── Console / Log Pane ──
+        log_pane = tk.Frame(paned, bg=BG_DARK)
+        paned.add(log_pane, minsize=180)
+
+        hdr = tk.Frame(log_pane, bg=BG_DARK)
         hdr.pack(fill="x", pady=(0, 6))
         tk.Label(hdr, text="ACTIVITY LOG",
                  font=FONT_HEAD, bg=BG_DARK, fg=TEXT_PRI).pack(side="left")
@@ -615,7 +635,7 @@ class PinterestDownloaderApp(tk.Tk):
         StyledButton(hdr, "Clear", style="neutral",
                      command=self._clear_log).pack(side="right")
 
-        console_wrap = tk.Frame(parent, bg=BORDER, bd=1)
+        console_wrap = tk.Frame(log_pane, bg=BORDER, bd=1)
         console_wrap.pack(fill="both", expand=True)
 
         self._console = LogConsole(console_wrap)
@@ -629,6 +649,68 @@ class PinterestDownloaderApp(tk.Tk):
         self._console.append(
             "Tip: Set each slider to the number of that media type you want.", "info")
         self._console.append("─" * 58, "info")
+
+        # ── Queue Pane ──
+        queue_pane = tk.Frame(paned, bg=BG_DARK)
+        paned.add(queue_pane, minsize=180)
+
+        q_hdr = tk.Frame(queue_pane, bg=BG_DARK)
+        q_hdr.pack(fill="x", pady=(10, 6))
+        tk.Label(q_hdr, text="DOWNLOAD QUEUE",
+                 font=FONT_HEAD, bg=BG_DARK, fg=TEXT_PRI).pack(side="left")
+        tk.Frame(q_hdr, bg=BORDER, height=1).pack(side="left", fill="x",
+                                                 expand=True, padx=10, pady=7)
+        
+        StyledButton(q_hdr, "Remove Selected", style="neutral",
+                     command=self._remove_selected_queue).pack(side="right", padx=(6, 0))
+        StyledButton(q_hdr, "Clear Queue", style="neutral",
+                     command=self._clear_queue).pack(side="right")
+
+        queue_wrap = tk.Frame(queue_pane, bg=BORDER, bd=1)
+        queue_wrap.pack(fill="both", expand=True)
+
+        # Style for Treeview
+        style = ttk.Style()
+        style.configure("Custom.Treeview",
+                        background=BG_CARD,
+                        foreground=TEXT_PRI,
+                        fieldbackground=BG_CARD,
+                        bordercolor=BORDER,
+                        borderwidth=0,
+                        rowheight=26,
+                        font=FONT_BODY)
+        style.map("Custom.Treeview",
+                  background=[("selected", ACCENT_DARK)],
+                  foreground=[("selected", TEXT_PRI)])
+        
+        style.configure("Custom.Treeview.Heading",
+                        background=BG_INPUT,
+                        foreground=TEXT_SEC,
+                        bordercolor=BORDER,
+                        borderwidth=1,
+                        font=FONT_SUB)
+
+        self._queue_tree = ttk.Treeview(
+            queue_wrap,
+            columns=("query", "folder", "types", "status"),
+            show="headings",
+            style="Custom.Treeview",
+            selectmode="browse"
+        )
+        self._queue_tree.heading("query", text="Keyword / URL")
+        self._queue_tree.heading("folder", text="Output Folder")
+        self._queue_tree.heading("types", text="Config (Img/Vid/Gif)")
+        self._queue_tree.heading("status", text="Status")
+        
+        self._queue_tree.column("query", width=180, anchor="w")
+        self._queue_tree.column("folder", width=220, anchor="w")
+        self._queue_tree.column("types", width=120, anchor="center")
+        self._queue_tree.column("status", width=100, anchor="center")
+
+        q_scroll = ttk.Scrollbar(queue_wrap, command=self._queue_tree.yview)
+        self._queue_tree.config(yscrollcommand=q_scroll.set)
+        q_scroll.pack(side="right", fill="y")
+        self._queue_tree.pack(side="left", fill="both", expand=True, padx=2, pady=2)
 
         # Stats bar
         stats = tk.Frame(parent, bg=BG_CARD)
@@ -690,6 +772,105 @@ class PinterestDownloaderApp(tk.Tk):
                                     initialdir=self._folder_var.get())
         if d:
             self._folder_var.set(d)
+            self._parent_folder = None
+            self._console.append(f"Download folder set to: {d} (Parent Folder Mode disabled)", "info")
+
+    def _browse_parent_folder(self):
+        initial = self._parent_folder or self._folder_var.get()
+        d = filedialog.askdirectory(title="Select Parent Download Folder",
+                                    initialdir=initial)
+        if d:
+            self._parent_folder = d
+            self._folder_var.set(f"[Parent] {d}")
+            self._console.append(f"Parent folder set to: {d}", "success")
+            self._console.append("Queue items will be downloaded into subfolders inside this parent folder.", "info")
+
+    def _add_to_queue(self):
+        query = self._query_entry.real_value().strip()
+        if not query:
+            messagebox.showwarning("Missing Input", "Please enter a keyword or board URL to queue.")
+            return
+
+        # Determine output directory
+        if self._parent_folder:
+            # Clean keyword for folder name
+            clean_name = "".join(c for c in query if c.isalnum() or c in (" ", "_", "-")).strip()
+            if not clean_name:
+                clean_name = "download_" + str(int(time.time()))
+            dest_folder = os.path.join(self._parent_folder, clean_name)
+        else:
+            base_dir = self._folder_var.get().strip()
+            # If they didn't explicitly set a parent folder but queued, let's subfolder under the current save folder
+            clean_name = "".join(c for c in query if c.isalnum() or c in (" ", "_", "-")).strip()
+            if not clean_name:
+                clean_name = "download_" + str(int(time.time()))
+            dest_folder = os.path.join(base_dir, clean_name)
+
+        img_count = self._img_slider.value
+        vid_count = self._vid_slider.value
+        gif_count = self._gif_slider.value
+
+        if img_count + vid_count + gif_count == 0:
+            messagebox.showwarning("Nothing Selected",
+                                   "All sliders are at 0.\n"
+                                   "Drag at least one slider above 0 to queue.")
+            return
+
+        types_str = f"{img_count}🖼 / {vid_count}🎬 / {gif_count}✨"
+        
+        # Add to Treeview
+        item_id = self._queue_tree.insert(
+            "", "end",
+            values=(query, dest_folder, types_str, "Pending")
+        )
+
+        item = {
+            "id": item_id,
+            "query": query,
+            "folder": dest_folder,
+            "img_count": img_count,
+            "vid_count": vid_count,
+            "gif_count": gif_count,
+            "status": "Pending"
+        }
+        self._queue_items.append(item)
+        self._console.append(f"Queued: '{query}' -> {dest_folder}", "success")
+
+        # Clear query entry
+        self._query_entry.delete(0, "end")
+        self._query_entry._show_placeholder()
+        self._update_start_button_text()
+
+    def _clear_queue(self):
+        if self._running:
+            messagebox.showwarning("Queue Running", "Cannot clear queue while downloads are in progress.")
+            return
+        self._queue_tree.delete(*self._queue_tree.get_children())
+        self._queue_items.clear()
+        self._update_start_button_text()
+        self._console.append("Queue cleared.", "info")
+
+    def _remove_selected_queue(self):
+        if self._running:
+            messagebox.showwarning("Queue Running", "Cannot modify queue while downloads are in progress.")
+            return
+        selected = self._queue_tree.selection()
+        if not selected:
+            return
+        for item_id in selected:
+            self._queue_tree.delete(item_id)
+            self._queue_items = [item for item in self._queue_items if item["id"] != item_id]
+        self._update_start_button_text()
+        self._console.append("Selected item(s) removed from queue.", "info")
+
+    def _update_start_button_text(self):
+        if self._running:
+            return
+        q_len = len(self._queue_items)
+        if q_len > 0:
+            self._start_btn.config(text=f"  ▶  START QUEUE ({q_len})  ")
+        else:
+            self._start_btn.config(text="  ▶  START DOWNLOAD  ")
 
     def _open_folder(self):
         p = self._folder_var.get()
@@ -711,49 +892,64 @@ class PinterestDownloaderApp(tk.Tk):
         if self._running:
             return
 
-        query = self._query_entry.real_value().strip()
-        if not query:
-            messagebox.showwarning("Missing Input",
-                                   "Please enter a keyword or board URL.")
-            return
-
-        output_dir = self._folder_var.get().strip()
-        if not output_dir:
-            messagebox.showwarning("Missing Folder",
-                                   "Please select a download folder.")
-            return
-
-        img_count = self._img_slider.value
-        vid_count = self._vid_slider.value
-        gif_count = self._gif_slider.value
-        threads   = self._threads_var.get()
-
-        if img_count + vid_count + gif_count == 0:
-            messagebox.showwarning("Nothing Selected",
-                                   "All sliders are at 0.\n"
-                                   "Drag at least one slider above 0 to download.")
-            return
-
-        # Auto-detect URL
-        if is_board_url(query):
-            self._mode_var.set("board")
+        # If queue is empty, auto-queue the current input
+        if not self._queue_items:
+            query = self._query_entry.real_value().strip()
+            if not query:
+                messagebox.showwarning("Missing Input",
+                                       "Please enter a keyword/URL or add items to the queue.")
+                return
+            self._add_to_queue()
 
         self._running = True
+        self._current_queue_index = 0
+        
         self._start_btn.config(state="disabled", text="  ⏳  DOWNLOADING…  ")
         self._stop_btn.config(state="normal")
+        self._elapsed_lbl.config(text="")
+        self._start_time = time.time()
+        
+        self._start_next_queue_item()
+
+    def _start_next_queue_item(self):
+        if not self._running:
+            return
+
+        if self._current_queue_index >= len(self._queue_items):
+            self._finish_download()
+            return
+
+        item = self._queue_items[self._current_queue_index]
+        item["status"] = "Downloading"
+        
+        # Update Treeview status column (index 3)
+        self._queue_tree.item(item["id"], values=(
+            item["query"], item["folder"],
+            self._queue_tree.item(item["id"], "values")[2], "Downloading"
+        ))
+        self._queue_tree.selection_set(item["id"])
+        self._queue_tree.see(item["id"])
+
+        query = item["query"]
+        output_dir = item["folder"]
+        img_count = item["img_count"]
+        vid_count = item["vid_count"]
+        gif_count = item["gif_count"]
+        threads = self._threads_var.get()
+
+        # Reset item-specific progress and stats labels
         self._progress_var.set(0)
         self._progress_txt.config(text="0 / ?")
         self._dl_img_lbl.config(text="Images: 0")
         self._dl_vid_lbl.config(text="Videos: 0")
         self._dl_gif_lbl.config(text="GIFs: 0")
-        self._elapsed_lbl.config(text="")
-        self._set_status("Fetching pin metadata…", ACCENT)
-        self._start_time = time.time()
+        
+        self._set_status(f"Downloading [{self._current_queue_index + 1}/{len(self._queue_items)}]: {query}", ACCENT)
 
         self._progress_bar.config(mode="indeterminate")
         self._progress_bar.start(12)
 
-        self._log_q      = queue.Queue()
+        self._log_q = queue.Queue()
         self._progress_q = queue.Queue()
 
         self._worker = DownloadWorker(self._log_q, self._progress_q)
@@ -766,14 +962,25 @@ class PinterestDownloaderApp(tk.Tk):
     def _stop_download(self):
         if self._worker:
             self._worker.stop()
-            self._log_q.put(("warning", f"[{ts()}] Stop requested by user."))
+            if self._log_q:
+                self._log_q.put(("warning", f"[{ts()}] Stop requested by user."))
+        
+        if self._running and 0 <= self._current_queue_index < len(self._queue_items):
+            item = self._queue_items[self._current_queue_index]
+            item["status"] = "Stopped"
+            self._queue_tree.item(item["id"], values=(
+                item["query"], item["folder"],
+                self._queue_tree.item(item["id"], "values")[2], "Stopped"
+            ))
+            
         self._finish_download()
 
     def _finish_download(self):
         self._running = False
         self._progress_bar.stop()
         self._progress_bar.config(mode="determinate")
-        self._start_btn.config(state="normal", text="  ▶  START DOWNLOAD  ")
+        self._start_btn.config(state="normal")
+        self._update_start_button_text()
         self._stop_btn.config(state="disabled")
         elapsed = time.time() - self._start_time
         self._elapsed_lbl.config(text=f"Elapsed: {elapsed:.1f}s")
@@ -786,7 +993,20 @@ class PinterestDownloaderApp(tk.Tk):
             while True:
                 level, msg = self._log_q.get_nowait()
                 self._console.append(msg, level)
-        except queue.Empty:
+                
+                # Parse counts from log messages
+                img_match = re.search(r"✓\s+(\d+)\s+images\s+saved", msg)
+                if img_match:
+                    self._dl_img_lbl.config(text=f"Images: {img_match.group(1)}")
+                
+                vid_match = re.search(r"✓\s+(\d+)\s+videos\s+saved", msg)
+                if vid_match:
+                    self._dl_vid_lbl.config(text=f"Videos: {vid_match.group(1)}")
+                    
+                gif_match = re.search(r"✓\s+(\d+)\s+GIFs\s+saved", msg)
+                if gif_match:
+                    self._dl_gif_lbl.config(text=f"GIFs: {gif_match.group(1)}")
+        except (queue.Empty, AttributeError):
             pass
 
         # Progress
@@ -794,7 +1014,7 @@ class PinterestDownloaderApp(tk.Tk):
         try:
             while True:
                 done, total = self._progress_q.get_nowait()
-        except queue.Empty:
+        except (queue.Empty, AttributeError):
             pass
 
         if done is not None and total is not None:
@@ -805,11 +1025,63 @@ class PinterestDownloaderApp(tk.Tk):
             else:
                 self._progress_var.set(0)
 
-        # Detect completion
+        # Detect completion of current item
         if self._running and self._thread and not self._thread.is_alive():
-            self._finish_download()
+            # Check if stopped
+            is_stopped = self._worker._stop.is_set() if self._worker else False
+            
+            item = self._queue_items[self._current_queue_index]
+            status = "Stopped" if is_stopped else "Completed"
+            item["status"] = status
+            self._queue_tree.item(item["id"], values=(
+                item["query"], item["folder"],
+                self._queue_tree.item(item["id"], "values")[2], status
+            ))
+            
+            # Flush log and progress queues
+            self._flush_queues()
+            
+            if is_stopped:
+                # If stopped by user, abort the whole queue
+                self._finish_download()
+            else:
+                # Move to next item
+                self._current_queue_index += 1
+                if self._current_queue_index < len(self._queue_items):
+                    self._start_next_queue_item()
+                else:
+                    self._finish_download()
 
         self.after(80, self._poll_queues)
+
+    def _flush_queues(self):
+        try:
+            while True:
+                level, msg = self._log_q.get_nowait()
+                self._console.append(msg, level)
+                
+                # Parse counts from log messages
+                img_match = re.search(r"✓\s+(\d+)\s+images\s+saved", msg)
+                if img_match:
+                    self._dl_img_lbl.config(text=f"Images: {img_match.group(1)}")
+                vid_match = re.search(r"✓\s+(\d+)\s+videos\s+saved", msg)
+                if vid_match:
+                    self._dl_vid_lbl.config(text=f"Videos: {vid_match.group(1)}")
+                gif_match = re.search(r"✓\s+(\d+)\s+GIFs\s+saved", msg)
+                if gif_match:
+                    self._dl_gif_lbl.config(text=f"GIFs: {gif_match.group(1)}")
+        except (queue.Empty, AttributeError):
+            pass
+
+        try:
+            while True:
+                done, total = self._progress_q.get_nowait()
+                if total > 0:
+                    pct = (done / total) * 100
+                    self._progress_var.set(pct)
+                    self._progress_txt.config(text=f"{done} / {total}")
+        except (queue.Empty, AttributeError):
+            pass
 
     # ── Window close ─────────────────────────────────────────────────────
     def _on_close(self):

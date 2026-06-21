@@ -31,7 +31,7 @@ A fast, threaded desktop application for bulk downloading Pinterest **images**, 
 
 [![Download Installer](https://img.shields.io/badge/Download-Windows_Installer_.exe-E60023?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/IamOumarIbrahim/pinterest-mass-downloader/releases/latest/download/PinterestMassDownloader_Setup.exe)
 
-Download the latest `PinterestMassDownloader_Setup.exe` from the link above, run the Inno Setup installer, and launch directly — no Python or pip setup needed.
+Download the latest `PinterestMassDownloader_Setup.exe` from the link above, run the [Inno Setup](https://jrsoftware.org/isinfo.php) installer, and launch directly — no Python or pip setup needed.
 
 For manual / developer installation, see [Quick Setup & Installation](#-quick-setup--installation) below.
 
@@ -41,10 +41,11 @@ For manual / developer installation, see [Quick Setup & Installation](#-quick-se
 
 - 🔍 **Keyword Search** — search any topic (e.g. `Fortnite cosplays`, `cyberpunk art`)
 - 🌐 **Board / Pin URL** — paste any Pinterest board or pin URL to bulk download its content
+- 📋 **Download Queue** — queue multiple searches/URLs and download them sequentially without manual intervention
+- 📁 **Parent Folder Mode** — automatically generates query-named subfolders inside a selected parent directory
 - 🖼️ **Independent Per-Type Sliders** — separate count controls for **Pictures**, **Videos**, and **GIFs** (0–300 each)
 - ✅ **Accurate Media Filtering** — uses a two-step scrape → classify → download pipeline; selecting "Videos" will **never** save JPGs
 - ⚡ **Threaded Downloads** — adjustable parallel thread slider (1–32 concurrent connections)
-- 📁 **Native Folder Picker** — browse and set any output directory via the OS file dialog
 - 📋 **Live Activity Log** — color-coded real-time console (green = success, yellow = warning, red = error)
 - ⏹️ **Stop Button** — gracefully cancel a download mid-session without crashing
 - 🎨 **Premium Dark Theme** — Pinterest red accent, Segoe UI typography, animated progress bar
@@ -128,6 +129,18 @@ On first launch, if `pinterest-dl` is not installed, the app will detect this an
 2. Paste the URL (e.g. `https://www.pinterest.com/username/board-name/`)
 3. Set your per-type counts and output folder
 4. Click **▶ START DOWNLOAD**
+
+### 📋 Using the Download Queue
+1. Click **Parent Folder** to choose a root directory where all downloads will go.
+2. Enter a keyword or URL in the query box.
+3. Drag the **Pictures**, **Videos**, and/or **GIFs** sliders to your desired counts.
+4. Click **+ Queue** (or press `Enter` in the query field) to add the search to the list.
+5. Repeat for any other searches you wish to queue up.
+6. Review the list in the **Download Queue** panel. You can select items and click **Remove Selected** or **Clear Queue** to manage the list.
+7. Click **▶ START QUEUE (N)** to begin downloading all queries sequentially without manual intervention.
+
+> [!TIP]
+> Subfolders named after each search query will be created inside the chosen Parent Folder. If you don't choose a parent folder but use the queue, subfolders will be created inside the default save folder.
 
 > [!TIP]
 > Set sliders you don't need to **0** to skip that media type entirely and download faster. For example, set Videos and GIFs to 0 for an images-only run.

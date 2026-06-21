@@ -42,3 +42,7 @@ desktop.ini
 implementation_plan.md
 cookies.json
 *.json
+
+# PyInstaller
+*.spec
+pinterest_downloader.exe

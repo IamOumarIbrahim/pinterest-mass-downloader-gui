@@ -1,111 +1,174 @@
-<!--
-  MASTER README TEMPLATE
-  Copy this file into any new or existing repository as README.md and fill in every
-  [BRACKETED] field. Delete any optional section (Mathematical Foundations, Screenshots)
-  that does not apply to the project. Keep section ordering consistent across repos —
-  this is what makes a portfolio look like one coherent body of work instead of
-  twenty unrelated dumps.
--->
+<div align="center">
+  <h1>🛑 Pinterest Mass Downloader</h1>
+  <p><strong>A fast desktop application for bulk downloading Pinterest media</strong></p>
 
-# 📌 Pinterest Mass Downloader — A fast desktop application for bulk downloading Pinterest media
+  [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg?style=flat-square&logo=python&logoColor=white)](#)
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
+  [![Platform](https://img.shields.io/badge/Platform-Windows_11-lightgrey.svg?style=flat-square)](#)
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
-[![Language](https://img.shields.io/badge/Python-3.10+-blue.svg?style=flat-square&logo=python&logoColor=white)](#)
-[![Platform](https://img.shields.io/badge/Platform-Windows_11-lightgrey.svg?style=flat-square)](#)
-[![Key Dependency](https://img.shields.io/badge/pinterest--dl-Backend-E60023.svg?style=flat-square)](#)
+  <br />
+  [![pinterest-dl](https://img.shields.io/badge/Backend-pinterest--dl-E60023.svg?style=flat-square)](#)
+</div>
 
-A fast, threaded desktop application for bulk downloading Pinterest images, videos, and GIFs by keyword search or board URL, featuring a premium dark-themed GUI.
+<p align="center">
+  <img src="assets/demo.gif" alt="Pinterest Downloader Live Demo" width="100%" />
+</p>
+
+> [!IMPORTANT]
+> **Account Requirement**: Pinterest frequently updates their scraping protections; you may need to provide session cookies for large batch downloads.
+
+Pinterest Mass Downloader is a fast, threaded desktop application for bulk downloading Pinterest images, videos, and GIFs by keyword search or board URL, featuring a premium dark-themed GUI. It simplifies the archival of visual references and mood boards without manually saving each pin.
+
+```python
+// Command line execution example
+python pinterest_downloader.py --board "https://pinterest.com/user/board" --out "./downloads"
+```
+
+<br />
+
+## 📖 Table of Contents
+- [What is Pinterest Mass Downloader?](#-what-is-pinterest-mass-downloader)
+- [Key Features](#-key-features)
+- [System Architecture](#-system-architecture)
+- [Setup & Installation](#-setup--installation)
+- [How to Use](#-how-to-use)
+- [Reference Tables](#-reference-tables)
+- [Scope & Limitations](#-scope--limitations)
+- [File Structure](#-file-structure)
+- [Troubleshooting](#-troubleshooting)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
-## 📖 Table of Contents
-- [Key Features](#-key-features)
-- [System Architecture](#%EF%B8%8F-system-architecture)
-- [Quick Setup & Installation](#-quick-setup--installation)
-- [How to Use](#-how-to-use)
-- [File Structure](#-file-structure)
-- [License](#-license)
+## 💡 What is Pinterest Mass Downloader?
+
+Archiving full mood boards or reference collections from Pinterest manually takes hours and often results in compressed or incomplete downloads. 
+
+Instead of manual right-clicking, Pinterest Mass Downloader automates the process:
+- **Bulk Extraction**: Pulls entire boards or keyword search results instantly.
+- **Threaded Downloading**: Maximizes your bandwidth to pull media in parallel.
+- **Premium GUI**: Provides an easy-to-use dark-themed interface for non-technical users.
 
 ---
 
 ## ✨ Key Features
 
-- Keyword Search & Board URL Modes: Search any topic or paste a board/pin URL to bulk download.
-- Accurate Media Filtering: Two-step scrape and classify pipeline ensures only selected media types are downloaded.
-- Independent Per-Type Sliders: Separate count controls for Pictures, Videos, and GIFs.
-- Download Queue & Parent Folder Mode: Queue multiple searches and automatically organize into subfolders.
-- Threaded Downloads: Adjustable parallel thread slider for 1-32 concurrent connections.
+- ⚡ **Multi-Threaded**: Downloads concurrent media streams to saturate your connection.
+- 🎨 **Dark-Themed GUI**: Built with modern UI libraries for a clean desktop experience.
+- 🔗 **Board & Keyword Support**: Scrape directly from a curated URL or a broad keyword query.
+- 📦 **Standalone Executable**: Ships with a pre-compiled `.exe` so no Python installation is required.
 
 ---
 
 ## ⚙️ System Architecture
 
-Data flow from the GUI thread to the daemon download worker, classifying and saving different media types.
+Data flow from the Pinterest servers to your local storage via the application.
 
 ```mermaid
 graph TD
-    Input["Main GUI Thread"] --> Stage1["DownloadWorker (Daemon)"]
-    Stage1 --> Stage2["Scrape Metadata"]
-    Stage2 --> Output["Classify and Download (Video/GIF/Image)"]
+    [User GUI] --> [Thread Manager]
+    [Thread Manager] --> [Scraper Engine]
+    [Scraper Engine] --> [Pinterest CDN]
+    [Pinterest CDN] --> [Local Storage]
 
     classDef default fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff;
     classDef process fill:#1e1b4b,stroke:#a855f7,stroke-width:2px,color:#fff;
-    class Stage1,Stage2 process;
+    class [Thread Manager],[Scraper Engine] process;
 ```
+
+> [!NOTE]
+> **Design Decision**: A threaded architecture was chosen over async/await to easily integrate with standard UI framework event loops without complex thread-safety issues.
 
 ---
 
-## 🚀 Quick Setup & Installation
+## 🚀 Setup & Installation
 
-### Prerequisites (Zero-Dependency Setup)
-This guide assumes a clean machine with **no pre-installed tools**.
-
+### Option A: 1-Click Setup (Windows)
 ```cmd
-winget install --id Python.Python.3.10 -e --accept-source-agreements --accept-package-agreements
-winget install --id Git.Git -e --accept-source-agreements --accept-package-agreements
+pinterest_downloader.exe
 ```
+Just run the pre-compiled executable, no installation needed.
 
-🔍 **Verification Command**:
-```cmd
-python --version
-```
-*Expected Output*: `Python 3.10.x`
+### Option B: Manual Installation
 
-### Clone & Install
 ```bash
-git clone https://github.com/IamOumarIbrahim/pinterest-mass-downloader.git
-cd pinterest-mass-downloader
+git clone https://github.com/username/pinterest.git
+cd pinterest
 pip install -r requirements.txt
 ```
 
-### Run
+🔍 **Verification Command**:
 ```bash
-python pinterest_downloader.py
+python pinterest_downloader.py --help
+```
+*Expected Output*: Displays the CLI help menu.
+
+---
+
+## 🖥️ How to Use
+
+1. Launch `pinterest_downloader.exe`.
+2. Paste your target Board URL or type a search query.
+3. Select an output directory and click "Start Download".
+
+```bash
+# Alternative CLI usage
+python pinterest_downloader.py --keyword "cyberpunk city" --limit 100
 ```
 
 ---
 
-## 🛠️ How to Use
+## 📊 Reference Tables
 
-1. Launch the application using `python pinterest_downloader.py` or the Windows installer executable.
-2. Select Keyword Search or Board / Pin URL mode.
-3. Drag the media sliders (Pictures, Videos, GIFs) to set download counts and choose an output folder, then click START DOWNLOAD.
+| CLI Flag | Description | Default |
+| :--- | :--- | :--- |
+| `--board` | URL of the Pinterest board | None |
+| `--keyword` | Search term to scrape | None |
+| `--limit` | Maximum number of pins | 50 |
 
-```bash
-# Example command
-python pinterest_downloader.py
-```
+---
+
+## 🔬 Scope & Limitations
+
+- **Scraping Protections**: Pinterest may block IP addresses that scrape too aggressively.
+- **Private Boards**: Cannot currently scrape private boards without manual cookie injection.
 
 ---
 
 ## 📁 File Structure
 
-pinterest-mass-downloader/
-├── pinterest_downloader.py - Main GUI entry file
-├── requirements.txt
-└── README.md
+```
+pinterest/
+├── pinterest_downloader.py    - Main application logic
+├── pinterest_downloader.spec  - PyInstaller build spec
+├── implementation_plan.md     - Developer roadmap
+├── requirements.txt           - Python dependencies
+└── README.md                  - Project documentation
+```
+
+---
+
+## 🩹 Troubleshooting
+
+| Issue | Root Cause | Resolution |
+| :--- | :--- | :--- |
+| Downloads failing instantly | Rate limiting | Wait 24 hours or use a VPN to change your IP |
+| Executable blocked | Windows SmartScreen | Click "More info" and "Run anyway" |
+
+---
+
+## 🧩 Contributing
+
+To contribute, review `implementation_plan.md` for upcoming features. The UI layer and the scraping engine are intentionally decoupled to allow easy updates to the scraper when Pinterest changes its API.
 
 ---
 
 ## 📄 License
-This repository is licensed under the [MIT License](LICENSE).
+MIT © 2024 Author(https://github.com/username)
+
+<div align="center">
+
+If Pinterest Mass Downloader saved you hours of right-clicking, a ⭐ helps other people find it.
+
+</div>

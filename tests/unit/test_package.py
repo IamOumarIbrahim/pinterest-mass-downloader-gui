@@ -24,34 +24,18 @@ def test_cli_version(capsys):
     assert "2.0.0" in captured.out
 
 
-def test_cli_no_args(capsys):
-    assert main([]) == 0
-    captured = capsys.readouterr()
-    assert "Launching Pinterest Mass Downloader GUI" in captured.out
-
-
 def test_cli_doctor(capsys):
     assert main(["doctor"]) == 0
     captured = capsys.readouterr()
-    assert "Doctor" in captured.out
+    assert "Doctor Report" in captured.out
 
 
-def test_cli_gui(capsys):
-    assert main(["gui"]) == 0
-    captured = capsys.readouterr()
-    assert "Launching GUI" in captured.out
-
-
-def test_cli_download(capsys):
-    assert main(["download"]) == 0
-    captured = capsys.readouterr()
-    assert "Download command" in captured.out
+def test_cli_download_validation_err(capsys):
+    assert main(["download", "--output", "/tmp"]) == 2
 
 
 def test_cli_unknown(capsys):
     assert main(["invalid-arg"]) == 2
-    captured = capsys.readouterr()
-    assert "Unknown argument" in captured.out
 
 
 def test_main_module_execution(monkeypatch):

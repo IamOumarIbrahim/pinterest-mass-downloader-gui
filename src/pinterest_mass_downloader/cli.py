@@ -3,9 +3,9 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import platform
 import sys
+from pathlib import Path
 from typing import List, Optional
 
 from pinterest_mass_downloader.application.engine import CancellationToken, DownloadEngine
@@ -20,14 +20,11 @@ from pinterest_mass_downloader.version import __version__
 
 def run_doctor() -> int:
     """Run system and environment diagnostic checks."""
+    import importlib.util
+
     import pinterest_dl
 
-    try:
-        import tkinter
-
-        tkinter_ok = True
-    except ImportError:
-        tkinter_ok = False
+    tkinter_ok = importlib.util.find_spec("tkinter") is not None
 
     import shutil
 

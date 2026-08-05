@@ -1,7 +1,6 @@
 """Comprehensive unit tests for the command-line interface."""
 
 import json
-import pytest
 
 from pinterest_mass_downloader.cli import main
 from tests.fakes import FakePinterestAdapter, MockPinterestMedia

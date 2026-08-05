@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>🛑 Pinterest Mass Downloader</h1>
+  <h1> Pinterest Mass Downloader</h1>
   <p><strong>A fast desktop application for bulk downloading Pinterest media</strong></p>
 
   <p>
@@ -26,7 +26,7 @@ python pinterest_downloader.py --board "https://pinterest.com/user/board" --out 
 
 <br />
 
-## 📖 Table of Contents
+## Table of Contents
 - [What is Pinterest Mass Downloader?](#-what-is-pinterest-mass-downloader)
 - [Key Features](#-key-features)
 - [System Architecture](#-system-architecture)
@@ -41,7 +41,7 @@ python pinterest_downloader.py --board "https://pinterest.com/user/board" --out 
 
 ---
 
-## 💡 What is Pinterest Mass Downloader?
+## What is Pinterest Mass Downloader?
 
 Archiving full mood boards or reference collections from Pinterest manually takes hours and often results in compressed or incomplete downloads. 
 
@@ -52,16 +52,16 @@ Instead of manual right-clicking, Pinterest Mass Downloader automates the proces
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-- ⚡ **Multi-Threaded**: Downloads concurrent media streams to saturate your connection.
-- 🎨 **Dark-Themed GUI**: Built with modern UI libraries for a clean desktop experience.
-- 🔗 **Board & Keyword Support**: Scrape directly from a curated URL or a broad keyword query.
-- 📦 **Standalone Executable**: Ships with a pre-compiled `.exe` so no Python installation is required.
+-  **Multi-Threaded**: Downloads concurrent media streams to saturate your connection.
+-  **Dark-Themed GUI**: Built with modern UI libraries for a clean desktop experience.
+-  **Board & Keyword Support**: Scrape directly from a curated URL or a broad keyword query.
+-  **Standalone Executable**: Ships with a pre-compiled `.exe` so no Python installation is required.
 
 ---
 
-## ⚙️ System Architecture
+## ️ System Architecture
 
 Data flow from the Pinterest servers to your local storage via the application.
 
@@ -82,7 +82,7 @@ graph TD
 
 ---
 
-## 🚀 Setup & Installation
+## Setup & Installation
 
 ### Option A: 1-Click Setup (Windows)
 ```cmd
@@ -98,7 +98,7 @@ cd pinterest
 pip install -r requirements.txt
 ```
 
-🔍 **Verification Command**:
+ **Verification Command**:
 ```bash
 python pinterest_downloader.py --help
 ```
@@ -106,7 +106,7 @@ python pinterest_downloader.py --help
 
 ---
 
-## 🖥️ How to Use
+## ️ How to Use
 
 1. Launch `pinterest_downloader.exe`.
 2. Paste your target Board URL or type a search query.
@@ -119,7 +119,7 @@ python pinterest_downloader.py --keyword "cyberpunk city" --limit 100
 
 ---
 
-## 📊 Reference Tables
+## Reference Tables
 
 | CLI Flag | Description | Default |
 | :--- | :--- | :--- |
@@ -129,14 +129,14 @@ python pinterest_downloader.py --keyword "cyberpunk city" --limit 100
 
 ---
 
-## 🔬 Scope & Limitations
+## Scope & Limitations
 
 - **Scraping Protections**: Pinterest may block IP addresses that scrape too aggressively.
 - **Private Boards**: Cannot currently scrape private boards without manual cookie injection.
 
 ---
 
-## 📁 File Structure
+## File Structure
 
 ```
 pinterest/
@@ -151,7 +151,7 @@ pinterest/
 
 ---
 
-## 🩹 Troubleshooting
+## Troubleshooting
 
 | Issue | Root Cause | Resolution |
 | :--- | :--- | :--- |
@@ -160,17 +160,17 @@ pinterest/
 
 ---
 
-## 🧩 Contributing
+## Contributing
 
 To contribute, review `implementation_plan.md` for upcoming features. The UI layer and the scraping engine are intentionally decoupled to allow easy updates to the scraper when Pinterest changes its API.
 
 ---
 
-## 📄 License
+## License
 MIT © 2024 Author(https://github.com/username)
 
 <div align="center">
 
-If Pinterest Mass Downloader saved you hours of right-clicking, a ⭐ helps other people find it.
+If Pinterest Mass Downloader saved you hours of right-clicking, a  helps other people find it.
 
 </div>

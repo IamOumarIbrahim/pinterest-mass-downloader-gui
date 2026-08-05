@@ -1,6 +1,7 @@
 """Test basic package imports and CLI entrypoints."""
 
 import pytest
+
 import pinterest_mass_downloader
 from pinterest_mass_downloader.cli import main
 from pinterest_mass_downloader.version import __version__
@@ -54,7 +55,9 @@ def test_cli_unknown(capsys):
 
 
 def test_main_module_execution(monkeypatch):
-    import sys, runpy
+    import runpy
+    import sys
+
     monkeypatch.setattr(sys, "argv", ["pmd", "--version"])
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("pinterest_mass_downloader", run_name="__main__")

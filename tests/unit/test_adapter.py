@@ -1,10 +1,10 @@
 """Unit tests for PinterestDLAdapter with mocks."""
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
+
 import pytest
 
-from pinterest_mass_downloader.domain.enums import BackendType, InputMode
+from pinterest_mass_downloader.domain.enums import InputMode
 from pinterest_mass_downloader.domain.errors import AdapterError
 from pinterest_mass_downloader.services.pinterest_adapter import PinterestDLAdapter
 

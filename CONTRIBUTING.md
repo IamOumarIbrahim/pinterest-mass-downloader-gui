@@ -1,21 +1,19 @@
-# Contributing Guidelines
+# Contributing to Pinterest Mass Downloader
 
-Thank you for your interest in contributing to this project.
+Thank you for contributing!
 
-## How to Contribute
+## Development Setup
 
-1. **Fork the repository** on GitHub.
-2. **Clone your fork** locally and create a new feature branch:
+1. Clone the repository and install in editable mode with development dependencies:
    ```bash
-   git checkout -b feature/your-feature-name
+   pip install -e ".[dev,build]"
    ```
-3. **Make your changes** following the repository's code style and formatting standards.
-4. **Test your changes** thoroughly to ensure no existing functionality is broken.
-5. **Commit your changes** with clear, descriptive commit messages.
-6. **Push to your fork** and submit a **Pull Request**.
 
-## Pull Request Guidelines
+2. Run the quality test suite:
+   ```bash
+   ruff format --check .
+   ruff check .
+   pytest --cov=pinterest_mass_downloader
+   ```
 
-- Provide a clear title and description explaining the changes.
-- Ensure all code is clean, readable, and well-documented.
-- Maintain documentation integrity and update documentation files if necessary.
+3. Ensure all tests and coverage checks pass before submitting pull requests.

@@ -1,15 +1,17 @@
-# Security Policy
+# Security Policy — Pinterest Mass Downloader
 
 ## Supported Versions
 
-Only the latest release version on the primary branch is actively supported with security updates.
+| Version | Supported          |
+| ------- | ------------------ |
+| 2.0.x   | :white_check_mark: |
+| < 2.0   | :x:                |
 
 ## Reporting a Vulnerability
 
-If you discover a potential security vulnerability in this repository:
+Please report security issues or credential leak concerns via email to `iamoumaribrahim@gmail.com`.
 
-1. **Do NOT open a public issue.**
-2. Please report the issue privately to the project maintainers via GitHub Security Advisories or direct contact.
-3. Include details of the vulnerability, steps to reproduce, and any potential mitigation.
+## Security Guarantees
 
-We will acknowledge receipt within 48 hours and work on a resolution promptly.
+- **No Secret Persistence**: Cookie files and authentication tokens are never stored in settings, queue state, manifest files, or logs.
+- **Path Sanitization**: All query strings and folder paths are sanitized against directory traversal attacks.

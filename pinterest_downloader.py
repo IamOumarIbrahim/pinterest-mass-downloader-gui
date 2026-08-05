@@ -63,15 +63,16 @@ def ts() -> str:
 def classify_pin(pin) -> str:
     """
     Returns 'video', 'gif', or 'image' based on PinterestMedia attributes.
-    - If pin.video_stream is set → video
-    - If pin.src ends with .gif  → gif
-    - Otherwise                  → image
+    - If pin.src ends with .gif or contains .gif in URL path → gif
+    - If pin.video_stream is set                           → video
+    - Otherwise                                            → image
     """
+    src = getattr(pin, "src", "") or ""
+    src_clean = src.split("?")[0].strip().lower()
+    if src_clean.endswith(".gif") or ".gif" in src_clean:
+        return "gif"
     if getattr(pin, "video_stream", None) is not None:
         return "video"
-    src = getattr(pin, "src", "") or ""
-    if src.lower().endswith(".gif"):
-        return "gif"
     return "image"
 
 
@@ -188,6 +189,41 @@ class DownloadWorker:
                 gifs_pool.append(pin)
             else:
                 images_pool.append(pin)
+
+        # ── Step 2b: Targeted GIF search fallback if requested ─────────────
+        if gif_count > len(gifs_pool):
+            needed_gifs = gif_count - len(gifs_pool)
+            if mode == "keyword":
+                gif_query = query_or_url if "gif" in query_or_url.lower() else f"{query_or_url} gif"
+                self._log(f"Searching specifically for GIFs using '{gif_query}'…")
+                try:
+                    gif_pins = client.search(
+                        query=gif_query,
+                        num=min(needed_gifs * 6, 300),
+                        min_resolution=(0, 0),
+                    )
+                    existing_ids = {getattr(p, "id", None) for p in gifs_pool}
+                    for g_pin in gif_pins:
+                        if classify_pin(g_pin) == "gif" and getattr(g_pin, "id", None) not in existing_ids:
+                            gifs_pool.append(g_pin)
+                            existing_ids.add(getattr(g_pin, "id", None))
+                            if len(gifs_pool) >= gif_count:
+                                break
+                except Exception as exc:
+                    self._log(f"Targeted GIF search warning: {exc}", "warning")
+            elif mode == "board" and fetch_n < 600:
+                self._log("Scraping additional board items to find GIFs…")
+                try:
+                    more_pins = client.scrape(url=query_or_url, num=600)
+                    existing_ids = {getattr(p, "id", None) for p in gifs_pool}
+                    for b_pin in more_pins:
+                        if classify_pin(b_pin) == "gif" and getattr(b_pin, "id", None) not in existing_ids:
+                            gifs_pool.append(b_pin)
+                            existing_ids.add(getattr(b_pin, "id", None))
+                            if len(gifs_pool) >= gif_count:
+                                break
+                except Exception as exc:
+                    self._log(f"Board GIF fetch warning: {exc}", "warning")
 
         self._log(
             f"Classified → Images: {len(images_pool)}  "

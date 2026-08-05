@@ -140,6 +140,8 @@ python pinterest_downloader.py --keyword "cyberpunk city" --limit 100
 
 ```
 pinterest/
+├── assets/
+│   └── demo.gif               - Demo preview animation
 ├── pinterest_downloader.py    - Main application logic
 ├── pinterest_downloader.spec  - PyInstaller build spec
 ├── implementation_plan.md     - Developer roadmap

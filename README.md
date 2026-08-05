@@ -2,12 +2,12 @@
   <h1>🛑 Pinterest Mass Downloader</h1>
   <p><strong>A fast desktop application for bulk downloading Pinterest media</strong></p>
 
-  [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg?style=flat-square&logo=python&logoColor=white)](#)
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
-  [![Platform](https://img.shields.io/badge/Platform-Windows_11-lightgrey.svg?style=flat-square)](#)
-
-  <br />
-  [![pinterest-dl](https://img.shields.io/badge/Backend-pinterest--dl-E60023.svg?style=flat-square)](#)
+  <p>
+    <a href="https://www.python.org/"><img src="https://img.shields.io/badge/Python-3.10+-blue.svg?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="License: MIT" /></a>
+    <img src="https://img.shields.io/badge/Platform-Windows_11-lightgrey.svg?style=flat-square" alt="Platform" />
+    <a href="https://pypi.org/project/pinterest-dl/"><img src="https://img.shields.io/badge/Backend-pinterest--dl-E60023.svg?style=flat-square" alt="pinterest-dl" /></a>
+  </p>
 </div>
 
 <p align="center">

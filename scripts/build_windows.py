@@ -1,8 +1,8 @@
 """Script to build standalone Windows executable via PyInstaller."""
 
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 
 def main():

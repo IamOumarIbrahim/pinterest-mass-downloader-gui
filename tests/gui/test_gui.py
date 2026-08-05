@@ -2,6 +2,8 @@
 
 import tkinter as tk
 
+import pytest
+
 from pinterest_mass_downloader.application.events import LogEvent
 from pinterest_mass_downloader.ui.app import PinterestDownloaderGUI
 from pinterest_mass_downloader.ui.controller import UIController
@@ -19,7 +21,11 @@ def test_ui_controller_event_flow():
 
 
 def test_gui_instantiation(tmp_path):
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("Tkinter display not available in headless environment")
+
     root.withdraw()
 
     try:

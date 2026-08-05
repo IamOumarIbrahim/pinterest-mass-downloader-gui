@@ -1,6 +1,7 @@
 """Integration test verifying wheel package build and metadata."""
 
 from pathlib import Path
+
 import pinterest_mass_downloader
 
 

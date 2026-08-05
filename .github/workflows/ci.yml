@@ -40,7 +40,13 @@ jobs:
           python -m ruff format --check .
           python -m ruff check .
 
-      - name: Run Pytest Suite with Coverage
+      - name: Run Pytest Suite with Coverage (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a python -m pytest --cov=pinterest_mass_downloader --cov-report=term-missing --cov-fail-under=80
+
+      - name: Run Pytest Suite with Coverage (Windows)
+        if: runner.os == 'Windows'
         run: |
           python -m pytest --cov=pinterest_mass_downloader --cov-report=term-missing --cov-fail-under=80
 

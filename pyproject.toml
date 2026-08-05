@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pinterest-mass-downloader"
+version = "2.0.0"
+description = "A powerful, multi-threaded Pinterest mass downloader with CLI and Tkinter GUI."
+readme = "README.md"
+authors = [
+    { name = "Oumar Ibrahim", email = "iamoumaribrahim@gmail.com" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "pinterest-dl[image]>=1.3,<2",
+    "platformdirs>=3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+]
+build = [
+    "build>=0.10.0",
+    "pyinstaller>=5.0",
+]
+
+[project.scripts]
+pinterest-mass-downloader = "pinterest_mass_downloader.cli:main"
+pmd = "pinterest_mass_downloader.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --cov=pinterest_mass_downloader --cov-report=term-missing"
+testpaths = ["tests"]
+markers = [
+    "live: mark test as requiring network access to Pinterest",
+]
+
+[tool.coverage.run]
+source = ["pinterest_mass_downloader"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true

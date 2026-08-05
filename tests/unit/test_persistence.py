@@ -1,6 +1,8 @@
 """Unit tests for settings and queue persistence."""
 
 import json
+from pathlib import Path
+
 import pytest
 
 from pinterest_mass_downloader.domain.enums import InputMode, JobStatus

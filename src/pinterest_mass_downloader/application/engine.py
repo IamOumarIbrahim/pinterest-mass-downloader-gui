@@ -1,7 +1,7 @@
 """Cancellable execution engine for Pinterest download jobs."""
 
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pinterest_mass_downloader.application.events import (
     AppEvent,
@@ -15,7 +15,8 @@ from pinterest_mass_downloader.domain.enums import JobStatus, MediaType
 from pinterest_mass_downloader.domain.errors import ValidationError
 from pinterest_mass_downloader.domain.models import Job, ResultSummary
 from pinterest_mass_downloader.infrastructure.paths import ensure_safe_directory, get_job_output_dir
-from pinterest_mass_downloader.services.classifier import select_media_items
+from pinterest_mass_downloader.services.classifier import get_media_identifier, select_media_items
+from pinterest_mass_downloader.services.manifests import ManifestManager
 from pinterest_mass_downloader.services.pinterest_adapter import IPinterestAdapter
 
 DEFAULT_BATCH_SIZE = 8
@@ -35,7 +36,7 @@ class CancellationToken:
 
 
 class DownloadEngine:
-    """Engine executing download jobs with cooperative batch cancellation."""
+    """Engine executing download jobs with cooperative batch cancellation and manifest resume."""
 
     def __init__(self, adapter: IPinterestAdapter, batch_size: int = DEFAULT_BATCH_SIZE):
         self.adapter = adapter
@@ -77,8 +78,11 @@ class DownloadEngine:
         if token.is_cancelled():
             return self._handle_cancellation(job, notify)
 
-        # 3. Output directory setup
+        # 3. Output directory & manifest setup
         job_dir = get_job_output_dir(job.request.output_dir, job.request.query, job.id)
+        manifest_mgr = ManifestManager(job_dir)
+        downloaded_pin_map: Dict[str, str] = {}
+
         if not job.request.dry_run:
             ensure_safe_directory(job_dir)
 
@@ -91,6 +95,11 @@ class DownloadEngine:
             notify(LogEvent(level="INFO", message=job.result.message))
             notify(TerminalResultEvent(job_id=job.id, result=job.result))
             return job.result
+
+        # Load existing completed identifiers from manifest for resume
+        existing_pin_ids = set()
+        if not job.request.overwrite:
+            existing_pin_ids = manifest_mgr.get_existing_completed_ids()
 
         # 4. Scrape / Search
         notify(StageChangeEvent(job_id=job.id, stage="scraping", message="Scraping Pinterest"))
@@ -127,32 +136,47 @@ class DownloadEngine:
             requested_videos=job.request.videos,
             requested_gifs=job.request.gifs,
         )
+
+        # Filter out existing items if resuming
+        to_download_items: List[Any] = []
+        for item in selected_items:
+            pin_id = get_media_identifier(item)
+            if pin_id in existing_pin_ids and not job.request.overwrite:
+                # Count as existing
+                for mtype in (MediaType.IMAGE.value, MediaType.VIDEO.value, MediaType.GIF.value):
+                    counts[mtype].existing += 1
+            else:
+                to_download_items.append(item)
+
         job.result.counts = counts
         notify(MediaCountsEvent(job_id=job.id, counts=counts))
 
         if not selected_items:
             job.transition_to(JobStatus.FAILED)
             job.result.message = "No media items matching requirements were found."
+            manifest_mgr.save_manifest(job, downloaded_pin_map)
             notify(LogEvent(level="WARNING", message=job.result.message))
             notify(TerminalResultEvent(job_id=job.id, result=job.result))
             return job.result
 
         if token.is_cancelled():
+            manifest_mgr.save_manifest(job, downloaded_pin_map)
             return self._handle_cancellation(job, notify)
 
         # 6. Download in Batches
         notify(
             StageChangeEvent(job_id=job.id, stage="downloading", message="Downloading media items")
         )
-        total_to_download = len(selected_items)
+        total_to_download = len(to_download_items)
         downloaded_count = 0
         failed_count = 0
 
         for i in range(0, total_to_download, self.batch_size):
             if token.is_cancelled():
+                manifest_mgr.save_manifest(job, downloaded_pin_map)
                 return self._handle_cancellation(job, notify)
 
-            batch = selected_items[i : i + self.batch_size]
+            batch = to_download_items[i : i + self.batch_size]
 
             try:
                 paths = self.adapter.download_media_items(
@@ -160,9 +184,13 @@ class DownloadEngine:
                     output_dir=job_dir,
                     raw_video=job.request.raw_video,
                 )
-                for p in paths:
+                for idx, p in enumerate(paths):
                     rel_p = str(p.relative_to(job_dir)) if p.is_relative_to(job_dir) else p.name
                     job.result.downloaded_files.append(rel_p)
+                    if idx < len(batch):
+                        item_id = get_media_identifier(batch[idx])
+                        downloaded_pin_map[item_id] = rel_p
+
                 downloaded_count += len(paths)
                 failed_in_batch = len(batch) - len(paths)
                 failed_count += failed_in_batch
@@ -173,28 +201,33 @@ class DownloadEngine:
 
             # Update count summaries
             for mtype in (MediaType.IMAGE.value, MediaType.VIDEO.value, MediaType.GIF.value):
-                counts[mtype].downloaded = min(counts[mtype].selected, downloaded_count)
-                counts[mtype].failed = counts[mtype].selected - counts[mtype].downloaded
+                counts[mtype].downloaded = min(
+                    counts[mtype].selected, downloaded_count + counts[mtype].existing
+                )
+                counts[mtype].failed = max(0, counts[mtype].selected - counts[mtype].downloaded)
 
+            manifest_mgr.save_manifest(job, downloaded_pin_map)
             notify(ProgressEvent(job_id=job.id, current=downloaded_count, total=total_to_download))
             notify(MediaCountsEvent(job_id=job.id, counts=counts))
 
             if token.is_cancelled():
+                manifest_mgr.save_manifest(job, downloaded_pin_map)
                 return self._handle_cancellation(job, notify)
 
         # 7. Finalize status
-        if downloaded_count == 0:
+        if total_to_download > 0 and downloaded_count == 0 and len(existing_pin_ids) == 0:
             job.transition_to(JobStatus.FAILED)
             job.result.message = "Failed to download any media items."
-        elif downloaded_count < total_to_download or failed_count > 0:
+        elif failed_count > 0:
             job.transition_to(JobStatus.PARTIAL)
             job.result.message = (
                 f"Partially completed: downloaded {downloaded_count}/{total_to_download} items."
             )
         else:
             job.transition_to(JobStatus.COMPLETED)
-            job.result.message = f"Successfully downloaded all {downloaded_count} media items."
+            job.result.message = "Successfully downloaded/resumed all media items."
 
+        manifest_mgr.save_manifest(job, downloaded_pin_map)
         notify(LogEvent(level="INFO", message=job.result.message))
         notify(TerminalResultEvent(job_id=job.id, result=job.result))
         return job.result

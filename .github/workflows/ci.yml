@@ -1,0 +1,63 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ master, feat/* ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  quality-and-test:
+    name: Test on ${{ matrix.os }} (Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install System Dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk xvfb
+
+      - name: Install Package & Dev Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,build]"
+
+      - name: Code Formatting & Linting (Ruff)
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
+
+      - name: Run Pytest Suite with Coverage
+        run: |
+          python -m pytest --cov=pinterest_mass_downloader --cov-report=term-missing --cov-fail-under=80
+
+      - name: Build Package (Wheel & Sdist)
+        run: |
+          python -m build
+
+      - name: Check Dependencies
+        run: |
+          python -m pip check
+
+      - name: GUI Smoke Test (Ubuntu Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a python scripts/gui_smoke.py
+
+      - name: GUI Smoke Test (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          python scripts/gui_smoke.py

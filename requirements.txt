@@ -1,3 +1,11 @@
 pinterest-dl>=1.3.0
 requests
-Pillow
+Pillow>=10.1
+numpy
+customtkinter>=5.2
+qrcode>=7.4
+
+# Optional, but recommended
+tkinterdnd2>=0.4          # drag & drop a reference picture onto the window
+cryptography>=41          # "secure mode" for one-tap Share buttons on the phone
+imageio-ffmpeg            # video thumbnails on the phone + rare HLS-only videos

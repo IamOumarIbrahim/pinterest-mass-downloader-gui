@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e0e11">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Pinterest Gallery</title>
+<style>
+:root{--bg:#0e0e11;--card:#18181d;--card2:#22222a;--line:#2b2b34;--text:#f2f2f5;--muted:#9c9ca8;--accent:#e60023}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:rgba(14,14,17,.88);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  padding:calc(10px + env(safe-area-inset-top)) 16px 10px;display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--line)}
+.logo{width:30px;height:30px;border-radius:50%;background:var(--accent);display:grid;place-items:center;font-weight:800;flex:none}
+header h1{font-size:17px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+button{font:inherit;color:inherit;border:0;background:var(--card2);border-radius:999px;padding:8px 14px;cursor:pointer}
+button.primary{background:var(--accent);color:#fff;font-weight:700}
+button:disabled{opacity:.4}
+.back{padding:6px 12px}
+.banner{margin:12px 16px 0;padding:12px 14px;border-radius:14px;background:var(--card);border:1px solid var(--line);font-size:13px;color:var(--muted)}
+.banner a{color:#fff;font-weight:700}
+.albums{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px;padding:16px}
+.album{background:var(--card);border-radius:16px;overflow:hidden;border:1px solid var(--line)}
+.album .cover{aspect-ratio:1;background:var(--card2) center/cover no-repeat}
+.album .meta{padding:9px 11px}
+.album b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.album span{color:var(--muted);font-size:12px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:3px}
+@media(min-width:700px){.grid{grid-template-columns:repeat(5,1fr)}}
+.tile{position:relative;aspect-ratio:1;background:var(--card2);overflow:hidden}
+.tile img{width:100%;height:100%;object-fit:cover;display:block}
+.tile .badge{position:absolute;left:6px;bottom:6px;background:rgba(0,0,0,.6);border-radius:8px;padding:1px 6px;font-size:11px}
+.tile .check{position:absolute;right:6px;top:6px;width:24px;height:24px;border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.25);display:none}
+.selecting .tile .check{display:block}
+.tile.sel .check{background:var(--accent);border-color:var(--accent)}
+.tile.sel .check::after{content:"✓";color:#fff;font-size:14px;font-weight:800;display:grid;place-items:center;height:100%}
+.tile.sel img{opacity:.75}
+.empty{padding:60px 24px;text-align:center;color:var(--muted)}
+.bar{position:fixed;left:12px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom));z-index:6;background:var(--card);border:1px solid var(--line);
+  border-radius:18px;padding:10px;display:none;gap:8px;align-items:center;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+.bar.show{display:flex}
+.bar .count{flex:1;padding-left:8px;font-weight:700}
+.viewer{position:fixed;inset:0;z-index:10;background:#000;display:none;flex-direction:column}
+.viewer.show{display:flex}
+.stage{flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:pan-y}
+.stage img,.stage video{max-width:100%;max-height:100%;object-fit:contain;user-select:none;-webkit-user-select:auto}
+.vtop,.vbot{display:flex;gap:8px;align-items:center;padding:10px 12px}
+.vtop{padding-top:calc(10px + env(safe-area-inset-top))}
+.vbot{padding-bottom:calc(14px + env(safe-area-inset-bottom));justify-content:center}
+.vtop .name{flex:1;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vbot button{padding:12px 18px}
+.toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:#fff;color:#000;border-radius:999px;padding:9px 16px;font-weight:600;
+  z-index:20;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;text-align:center}
+.toast.show{opacity:1}
+.hint{color:var(--muted);font-size:12px;text-align:center;padding:0 16px 8px}
+</style>
+</head>
+<body>
+<header>
+  <button class="back" id="back" style="display:none">‹</button>
+  <div class="logo" id="logo">P</div>
+  <h1 id="title">Your downloads</h1>
+  <button id="selectBtn" style="display:none">Select</button>
+</header>
+<div id="banner"></div>
+<main id="main"></main>
+<div class="bar" id="bar"><span class="count" id="selCount">0 selected</span>
+  <button id="selCancel">Cancel</button><button class="primary" id="selShare">Share</button></div>
+<div class="viewer" id="viewer">
+  <div class="vtop"><button id="vClose">✕</button><span class="name" id="vName"></span><span class="name" id="vPos" style="flex:none"></span></div>
+  <div class="stage" id="stage"></div>
+  <div class="hint" id="vHint"></div>
+  <div class="vbot">
+    <button id="vPrev">‹</button>
+    <button class="primary" id="vShare">Share</button>
+    <button id="vCopy">Copy</button>
+    <button id="vSave">Save</button>
+    <button id="vNext">›</button>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+const HTTPS_URL = __HTTPS_URL__;
+const secure = window.isSecureContext;
+const canShareFiles = secure && !!navigator.canShare;
+const $ = id => document.getElementById(id);
+const enc = p => p.split("/").map(encodeURIComponent).join("/");
+const fileUrl = it => "/file/" + enc(it.path);
+const thumbUrl = it => "/thumb/" + enc(it.path) + "?v=" + Math.round(it.mtime);
+let items = [], album = null, idx = 0, selecting = false, lastAlbums = [];
+const selected = new Set(), blobs = new Map();
+
+function toast(msg, ms = 2200) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ms);
+}
+
+function banner() {
+  if (secure || !HTTPS_URL) { $("banner").innerHTML = ""; return; }
+  $("banner").innerHTML = `<div class="banner">Long-press any picture to share or copy it.
+    For one-tap <b>Share</b> buttons, <a href="${HTTPS_URL}">switch to secure mode</a>
+    (your phone will warn once that the PC's certificate is self-made; choose <i>Advanced → Proceed</i>).</div>`;
+}
+
+async function showAlbums() {
+  album = null; selecting = false; selected.clear(); syncSelect();
+  $("title").textContent = "Your downloads"; $("back").style.display = "none";
+  $("logo").style.display = ""; $("selectBtn").style.display = "none";
+  const r = await fetch("/api/albums"); const d = await r.json();
+  const main = $("main");
+  if (!d.albums.length || !d.albums[0].count) {
+    main.innerHTML = `<div class="empty">Nothing here yet.<br>Download something on your PC and pull to refresh.</div>`; return;
+  }
+  main.innerHTML = `<div class="albums">${d.albums.filter(a => a.count).map((a, i) => `
+    <div class="album" data-i="${i}"><div class="cover" style="background-image:url('${a.cover ? thumbUrl({path:a.cover, mtime:0}) : ""}')"></div>
+    <div class="meta"><b>${esc(a.name)}</b><span>${a.count} file${a.count == 1 ? "" : "s"}</span></div></div>`).join("")}</div>`;
+  const list = d.albums.filter(a => a.count);
+  lastAlbums = list;
+  main.querySelectorAll(".album").forEach(el => el.onclick = () => openAlbum(list[+el.dataset.i]));
+}
+
+async function openAlbum(a) {
+  album = a; $("title").textContent = a.name; $("back").style.display = ""; $("logo").style.display = "none";
+  $("selectBtn").style.display = "";
+  history.pushState({album: a.id}, "", "#" + encodeURIComponent(a.id));
+  const r = await fetch("/api/items?album=" + encodeURIComponent(a.id)); items = (await r.json()).items;
+  render();
+}
+
+function render() {
+  const main = $("main");
+  if (!items.length) { main.innerHTML = `<div class="empty">This folder is empty.</div>`; return; }
+  main.innerHTML = `<div class="grid ${selecting ? "selecting" : ""}" id="grid">${items.map((it, i) => `
+    <div class="tile ${selected.has(i) ? "sel" : ""}" data-i="${i}"><img loading="lazy" src="${thumbUrl(it)}" alt="">
+    ${it.kind != "image" ? `<span class="badge">${it.kind == "video" ? "▶ video" : "GIF"}</span>` : ""}<span class="check"></span></div>`).join("")}</div>`;
+  main.querySelectorAll(".tile").forEach(el => {
+    el.onclick = () => { const i = +el.dataset.i; selecting ? toggle(i, el) : openViewer(i); };
+  });
+}
+
+function toggle(i, el) {
+  selected.has(i) ? selected.delete(i) : selected.add(i);
+  el.classList.toggle("sel"); syncSelect(); if (selected.has(i)) prefetch(items[i]);
+}
+function syncSelect() {
+  $("bar").classList.toggle("show", selecting);
+  $("selCount").textContent = `${selected.size} selected`;
+  $("selShare").disabled = !selected.size;
+  $("selectBtn").textContent = selecting ? "Done" : "Select";
+}
+$("selectBtn").onclick = () => { selecting = !selecting; if (!selecting) selected.clear(); syncSelect(); render(); };
+$("selCancel").onclick = () => { selecting = false; selected.clear(); syncSelect(); render(); };
+$("selShare").onclick = () => share([...selected].map(i => items[i]));
+$("back").onclick = () => history.back();
+window.onpopstate = () => { if ($("viewer").classList.contains("show")) closeViewer(true); else showAlbums(); };
+
+// ── viewer ──
+function openViewer(i) {
+  idx = i; $("viewer").classList.add("show"); show();
+  history.pushState({viewer: 1}, "", location.hash || "#");
+}
+function closeViewer(fromPop) {
+  $("viewer").classList.remove("show"); $("stage").innerHTML = "";
+  if (!fromPop) history.back();
+}
+function show() {
+  const it = items[idx], st = $("stage");
+  st.innerHTML = it.kind == "video"
+    ? `<video src="${fileUrl(it)}" controls autoplay playsinline loop></video>`
+    : `<img src="${fileUrl(it)}" alt="">`;
+  $("vName").textContent = it.name; $("vPos").textContent = `${idx + 1} / ${items.length}`;
+  $("vCopy").style.display = secure && it.kind != "video" ? "" : "none";
+  $("vHint").textContent = canShareFiles ? "" : "Tip: long-press the picture to share or copy it.";
+  prefetch(it); if (items[idx + 1]) prefetch(items[idx + 1]);
+}
+function step(d) { const n = idx + d; if (n >= 0 && n < items.length) { idx = n; show(); } }
+$("vPrev").onclick = () => step(-1); $("vNext").onclick = () => step(1);
+$("vClose").onclick = () => closeViewer(false);
+$("vShare").onclick = () => share([items[idx]]);
+$("vSave").onclick = () => { location.href = fileUrl(items[idx]) + "?dl=1"; };
+$("vCopy").onclick = () => copy(items[idx]);
+let x0 = null;
+$("stage").addEventListener("touchstart", e => x0 = e.touches[0].clientX, {passive: true});
+$("stage").addEventListener("touchend", e => {
+  if (x0 === null) return; const dx = e.changedTouches[0].clientX - x0; x0 = null;
+  if (Math.abs(dx) > 60) step(dx < 0 ? 1 : -1);
+});
+document.addEventListener("keydown", e => {
+  if (!$("viewer").classList.contains("show")) return;
+  if (e.key == "ArrowRight") step(1); if (e.key == "ArrowLeft") step(-1); if (e.key == "Escape") closeViewer(false);
+});
+
+// ── sharing: files are fetched ahead of time so the share sheet opens instantly ──
+function prefetch(it) {
+  if (!canShareFiles || blobs.has(it.path)) return;
+  blobs.set(it.path, fetch(fileUrl(it)).then(r => r.blob()).catch(() => null));
+}
+async function toFile(it) {
+  prefetch(it);
+  const b = await (blobs.get(it.path) || fetch(fileUrl(it)).then(r => r.blob()));
+  return new File([b], it.name, {type: b.type || "application/octet-stream"});
+}
+async function share(list) {
+  if (!list.length) return;
+  if (!canShareFiles) {
+    toast(HTTPS_URL ? "Long-press the picture to share it, or switch to secure mode for the Share button." : "Long-press the picture to share it.", 4000);
+    return;
+  }
+  try {
+    const files = await Promise.all(list.map(toFile));
+    if (!navigator.canShare({files})) { toast("Your phone can't share these files from the browser."); return; }
+    await navigator.share({files});
+  } catch (e) {
+    if (e.name == "NotAllowedError") toast("Tap Share once more.");
+    else if (e.name != "AbortError") toast("Sharing failed: " + e.message);
+  }
+}
+async function copy(it) {
+  try {
+    const f = await toFile(it);
+    const png = f.type == "image/png" ? f : await toPng(f);
+    await navigator.clipboard.write([new ClipboardItem({"image/png": png})]);
+    toast("Copied. Paste it anywhere.");
+  } catch (e) { toast("Copy isn't supported here. Long-press the picture instead."); }
+}
+async function toPng(blob) {
+  const bmp = await createImageBitmap(blob); const c = document.createElement("canvas");
+  c.width = bmp.width; c.height = bmp.height; c.getContext("2d").drawImage(bmp, 0, 0);
+  return new Promise(res => c.toBlob(res, "image/png"));
+}
+function esc(s) { return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+// clean the token out of the address bar (it now lives in a cookie)
+const startAlbum = decodeURIComponent(location.hash.slice(1));
+if (location.search.includes("t=")) history.replaceState(null, "", "/" + location.hash);
+banner();
+showAlbums().then(() => {
+  const a = lastAlbums.find(x => x.id === startAlbum && x.count);
+  if (startAlbum && a) openAlbum(a);
+});
+</script>
+</body>
+</html>

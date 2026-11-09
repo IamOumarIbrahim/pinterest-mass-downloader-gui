@@ -46,3 +46,9 @@ cookies.json
 # PyInstaller
 *.spec
 pinterest_downloader.exe
+
+# Testing & tool caches
+.coverage
+.agent-work/
+.pytest_cache/
+.ruff_cache/

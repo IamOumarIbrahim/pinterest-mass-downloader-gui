@@ -10,6 +10,10 @@
 </div>
 
 <p align="center">
+  <a href="https://github.com/IamOumarIbrahim/pinterest-mass-downloader-gui/releases/latest/download/pinterest_downloader.exe"><img alt="Download for Windows" src="https://img.shields.io/badge/Download-Windows%20.exe-e60023?style=for-the-badge&logo=windows&logoColor=white" /></a>
+</p>
+
+<p align="center">
   <a href="assets/demo.mp4"><img src="assets/demo.gif" alt="One-minute walkthrough: search, match a picture, download, share to phone" width="100%" /></a>
   <br />
   <sub>One-minute walkthrough. <a href="assets/demo.mp4">Watch it in full quality (MP4)</a>.</sub>
@@ -135,6 +139,10 @@ tools/demo/               scripts that record and edit the demo video above
 
 Run the tests with `python -m pytest tests`. To re-record the demo, run `python tools/demo/record_demo.py <reference.jpg> <workdir>` and then `python tools/demo/compose_video.py <workdir> assets/demo.mp4 assets/demo.gif`.
 </details>
+
+## Help the project
+
+Did this help you? Please give it a **star**, so more people can find it. Bugs and ideas are welcome in [Issues](https://github.com/IamOumarIbrahim/pinterest-mass-downloader-gui/issues).
 
 ## License
 

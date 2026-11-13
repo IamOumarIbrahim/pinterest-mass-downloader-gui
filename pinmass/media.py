@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import functools
 import io
 import os
 import shutil
 import subprocess
 import threading
+import time
 from typing import Optional
 
 import requests
 
-from .scraper import USER_AGENT, Pin
+from .scraper import USER_AGENT, Pin, resized
 
 DL_HEADERS = {"User-Agent": USER_AGENT, "Referer": "https://www.pinterest.com/"}
 MAX_THUMB_BYTES = 4 * 1024 * 1024
+CONNECT_TIMEOUT = 6   # a dead address should cost seconds, not the whole read timeout
 
 _local = threading.local()
 
@@ -73,7 +76,7 @@ def _is_animated(path: str) -> bool:
 
 def fetch_bytes(url: str, limit: int = MAX_THUMB_BYTES, timeout: float = 15) -> Optional[bytes]:
     try:
-        with _session().get(url, timeout=timeout, stream=True) as r:
+        with _session().get(url, timeout=(CONNECT_TIMEOUT, timeout), stream=True) as r:
             if r.status_code != 200:
                 return None
             buf = io.BytesIO()
@@ -89,7 +92,7 @@ def fetch_bytes(url: str, limit: int = MAX_THUMB_BYTES, timeout: float = 15) -> 
 def _stream_to(url: str, path: str, stop: threading.Event) -> bool:
     tmp = path + ".part"
     try:
-        with _session().get(url, timeout=30, stream=True) as r:
+        with _session().get(url, timeout=(CONNECT_TIMEOUT, 20), stream=True) as r:
             if r.status_code != 200:
                 return False
             with open(tmp, "wb") as f:
@@ -108,6 +111,7 @@ def _stream_to(url: str, path: str, stop: threading.Event) -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=1)
 def find_ffmpeg() -> Optional[str]:
     exe = shutil.which("ffmpeg")
     if exe:
@@ -153,25 +157,45 @@ def existing_file(pin: Pin, out_dir: str, want: str) -> Optional[str]:
     return None
 
 
-def download(pin: Pin, out_dir: str, want: str, stop: threading.Event) -> Optional[str]:
-    """Save *pin* as *want* ('image' | 'gif' | 'video'). Returns the path, or
-    None if it failed or turned out to be a different type (the file is removed:
-    asking for videos only must never leave pictures in the folder)."""
+def _fallbacks(url: str, want: str) -> list[str]:
+    """Same picture from Pinterest's resized renditions, for when the original fails."""
+    if want == "video" or "i.pinimg.com/originals/" not in url:
+        return []
+    return [resized(url, "736x")]
+
+
+def download(pin: Pin, out_dir: str, want: str, stop: threading.Event) -> tuple[str | None, str]:
+    """Save *pin* as *want* ('image' | 'gif' | 'video').
+
+    Returns (path, "ok") or (None, reason) with reason "network", "wrong-type",
+    "no-url" or "no-ffmpeg" (a streamed video that needs ffmpeg to be saved). A file of the wrong type is removed: asking for videos only
+    must never leave pictures in the folder.
+    """
     have = existing_file(pin, out_dir, want)
     if have:
-        return have
+        return have, "ok"
     url = pin.video_url if want == "video" else pin.src
     if not url:
-        return None
+        return None, "no-url"
     base = os.path.join(out_dir, pin.id)
     tmp = base + ".download"
     is_hls = want == "video" and url.split("?")[0].lower().endswith(".m3u8")
-    ok = _hls_to_mp4(url, tmp) if is_hls else _stream_to(url, tmp, stop)
+    if is_hls and not find_ffmpeg():
+        return None, "no-ffmpeg"
+    ok = False
+    for attempt, u in enumerate([url, url] + _fallbacks(url, want)):
+        if stop.is_set():
+            return None, "network"
+        if attempt:
+            time.sleep(0.5 * attempt)  # brief back-off for flaky CDN responses
+        ok = _hls_to_mp4(u, tmp) if is_hls else _stream_to(u, tmp, stop)
+        if ok:
+            break
     if not ok:
-        return None
+        return None, "network"
     if kind_of(tmp) != want:
         os.remove(tmp)
-        return None
+        return None, "wrong-type"
     with open(tmp, "rb") as f:
         fmt = sniff(f.read(512))
     final = base + EXT.get(fmt, ".bin")
@@ -179,9 +203,9 @@ def download(pin: Pin, out_dir: str, want: str, stop: threading.Event) -> Option
         final = base + ".mp4" if _remux_ts(tmp, base + ".mp4") else base + ".ts"
         if final.endswith(".mp4"):
             os.remove(tmp)
-            return final
+            return final, "ok"
     os.replace(tmp, final)
-    return final
+    return final, "ok"
 
 
 def _remux_ts(src: str, dst: str) -> bool:

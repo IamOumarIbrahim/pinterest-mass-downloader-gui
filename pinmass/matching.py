@@ -280,16 +280,30 @@ def keep_fraction(closeness: float) -> float:
 
 LOOK_FLOOR = 50.0      # below this nothing counts as "looks similar", however few pass
 NEAR_DUPLICATE = 90.0  # always a match
+# The same two limits for smart (CLIP) scores, which are 100 x cosine similarity:
+# unrelated pictures sit around 50, the same subject around 75, re-uploads at 95+.
+# Smart scores mean the same thing in every search, so "How close" maps
+# straight onto them: 0 → SMART_FLOOR, 100 → SMART_TOP.
+SMART_FLOOR = 62.0
+SMART_TOP = 90.0
+SMART_NEAR_DUPLICATE = 95.0
+# CLIP reads "text" as a topic, not as lettering; these phrasings find lettering.
+TEXT_TERMS = {"text", "words", "writing", "captions", "caption", "letters", "lettering",
+              "watermark", "watermarks", "quotes", "typography"}
 
 
 @dataclass
 class Score:
     look: Optional[float] = None
     color: Optional[ColorResult] = None
+    text: Optional[float] = None       # 50 = as much like the description as any picture
+    emb: Optional[np.ndarray] = field(default=None, repr=False)   # smart model's vector, if run
 
     @property
     def combined(self) -> float:
         parts = [x for x in (self.look, self.color.score if self.color else None) if x is not None]
+        if not parts and self.text is not None:
+            parts = [self.text]
         return float(np.mean(parts)) if parts else 0.0
 
 
@@ -302,55 +316,231 @@ class MatchSettings:
     colors: bool = False
     color_tolerance: float = 50.0
     closeness: float = 50.0
+    smart: bool = True               # use the CLIP model (see smart.py) when it's available
+    describe: str = ""               # "watercolor, no text": needs the CLIP model
+    # Pictures (bytes or paths) the user picked / passed over while previewing.
+    # With the CLIP model these steer "looks similar" towards the picks.
+    examples: list = field(default_factory=list)
+    rejects: list = field(default_factory=list)
 
     @property
     def active(self) -> bool:
         look = self.look and bool(self.reference)
         colors = self.colors and bool(self.reference or self.palette)
-        return look or colors
+        return look or colors or self.described or self.exampled
+
+    @property
+    def described(self) -> bool:
+        return self.smart and bool(self.describe.strip())
+
+    @property
+    def exampled(self) -> bool:
+        return self.smart and bool(self.examples)
+
+    @property
+    def wants_model(self) -> bool:
+        return self.smart and ((self.look and bool(self.reference)) or self.described
+                               or self.exampled)
+
+
+def _prompt(term: str) -> str:
+    return "a picture of words and letters" if term.lower() in TEXT_TERMS else f"a picture of {term}"
 
 
 class Matcher:
-    def __init__(self, settings: MatchSettings):
+    """Scores candidates against the reference picture, palette and description.
+
+    *clip* is the smart model from smart.get(). Left as "auto" the matcher uses
+    it only if it is already on disk; it never starts a download by itself.
+    """
+
+    def __init__(self, settings: MatchSettings, clip="auto"):
         self.s = settings
         ref = load(settings.reference) if settings.reference else None
+        if clip == "auto":
+            clip = None
+            if settings.wants_model:
+                from . import smart
+                clip = smart.get() if smart.installed() else None
+        self.clip = clip if settings.wants_model else None
         self.palette = None
         if settings.colors:
             self.palette = (Palette.from_entries(settings.palette) if settings.palette
                             else extract_palette(ref) if ref is not None else None)
-        self.sig = signature(ref) if settings.look and ref is not None else None
+        self.sig = None        # classic look-alike signature
+        self.ref_emb = None    # smart look-alike vector
+        if settings.look and ref is not None:
+            if self.clip is not None:
+                self.ref_emb = self.clip.image(ref)
+            else:
+                self.sig = signature(ref)
+        self.reject_embs = None
+        if self.clip is not None and settings.examples:
+            liked = [self.clip.image(load(e)) for e in settings.examples]
+            if self.ref_emb is not None:
+                liked.append(self.ref_emb)
+            mean = np.mean(liked, axis=0)
+            self.ref_emb = (mean / (np.linalg.norm(mean) + 1e-9)).astype(np.float32)
+            if settings.rejects:
+                self.reject_embs = np.array([self.clip.image(load(r)) for r in settings.rejects])
+        self.wanted = self.unwanted = None
+        self.terms: tuple[list, list] = ([], [])
+        if self.clip is not None and settings.described:
+            from .smart import parse_description
+            pos, neg = parse_description(settings.describe)
+            self.terms = (pos, neg)
+            self._plain = self.clip.text("a picture")
+            self.wanted = np.array([self.clip.text(_prompt(t)) for t in pos]) if pos else None
+            self.unwanted = np.array([self.clip.text(_prompt(t)) for t in neg]) if neg else None
+        self.floor = SMART_FLOOR if self.ref_emb is not None else LOOK_FLOOR
+        self.near = SMART_NEAR_DUPLICATE if self.ref_emb is not None else NEAR_DUPLICATE
 
-    def score(self, data: bytes) -> Optional[Score]:
-        """Raw scores for one candidate, or None if it can't be read."""
+    @property
+    def looks(self) -> bool:
+        return self.sig is not None or self.ref_emb is not None
+
+    @property
+    def describes(self) -> bool:
+        return self.wanted is not None or self.unwanted is not None
+
+    def modes(self) -> list[str]:
+        out = []
+        if self.looks:
+            out.append("your picks" if self.s.exampled and self.ref_emb is not None
+                       else "smart look-alike" if self.ref_emb is not None else "look-alike")
+        if self.palette is not None:
+            out.append("color")
+        if self.describes:
+            out.append("description")
+        return out
+
+    def score(self, data) -> Optional[Score]:
+        """Raw scores for one candidate (bytes, path or image), or None if it can't be read."""
         try:
             im = load(data)
         except Exception:
             return None
         sc = Score()
-        if self.sig is not None:
+        emb = None
+        if self.ref_emb is not None or self.describes:
+            try:
+                emb = sc.emb = self.clip.image(im)
+            except Exception:
+                return None
+        if self.ref_emb is not None:
+            sim = float(emb @ self.ref_emb)
+            if self.reject_embs is not None:
+                # closer to something that was passed over than to the picks: mark it down
+                sim -= max(0.0, float((self.reject_embs @ emb).max()) - sim)
+            sc.look = 100 * sim
+        elif self.sig is not None:
             sc.look = look_similarity(self.sig, signature(im))
+        if self.describes:
+            plain = float(emb @ self._plain)
+            # How much better the picture fits each wanted term than it fits
+            # "a picture" in general. An unwanted term only counts once the
+            # picture fits it better than that.
+            gain = float((self.wanted @ emb).mean()) - plain if self.wanted is not None else 0.0
+            loss = (max(0.0, float((self.unwanted @ emb).max()) - plain + 0.003)
+                    if self.unwanted is not None else 0.0)
+            sc.text = float(np.clip(50 + 1000 * (gain - loss), 0, 100))
         if self.palette is not None:
             sc.color = color_match(self.palette, im, self.s.color_tolerance)
         return sc
 
+    @property
+    def relative(self) -> bool:
+        """Does judging a candidate need to know the rest of the pool?"""
+        return self.sig is not None
+
     def look_cutoff(self, looks: list[float]) -> float:
-        """Look scores drift with the search (a 'fortnite' pool scores lower
-        than a 'fortnite llama' pool), so "How close" keeps the best share of
-        *this* pool rather than using a fixed number."""
+        """The look score a candidate needs.
+
+        Smart scores are comparable across searches, so "How close" sets the
+        bar directly. Classic scores drift with the search (a 'fortnite' pool
+        scores lower than a 'fortnite llama' pool), so there "How close" keeps
+        the best share of *this* pool instead.
+        """
+        c = min(max(self.s.closeness, 0.0), 100.0) / 100.0
+        if self.ref_emb is not None:
+            return SMART_FLOOR + (SMART_TOP - SMART_FLOOR) * c
         if not looks:
-            return LOOK_FLOOR
-        q = 1 - keep_fraction(self.s.closeness)
-        return max(LOOK_FLOOR, float(np.quantile(looks, q)))
+            return self.floor
+        return max(self.floor, float(np.quantile(looks, 1 - keep_fraction(self.s.closeness))))
+
+    def text_cutoff(self, texts: Optional[list] = None) -> float:
+        """The description score a candidate needs (50 = fits the wanted terms
+        exactly as well as it fits "a picture")."""
+        if self.wanted is None:
+            return 47.0   # unwanted terms only: drop the pictures that show them
+        return 50.0 + 0.3 * min(max(self.s.closeness, 0.0), 100.0)
+
+    def passes(self, sc: Score, look_cut: float, text_cut: float) -> bool:
+        if sc.color is not None and not sc.color.ok:
+            return False
+        if sc.text is not None and sc.text < text_cut:
+            return False
+        return sc.look is None or sc.look >= look_cut or sc.look >= self.near
 
     def select(self, scored: list) -> list:
         """[(item, Score)] -> [(item, combined score)] that pass, best first."""
-        cut = self.look_cutoff([sc.look for _, sc in scored if sc.look is not None])
-        out = []
-        for item, sc in scored:
-            if sc.look is not None and not (sc.look >= cut or sc.look >= NEAR_DUPLICATE):
-                continue
-            if sc.color is not None and not sc.color.ok:
-                continue
-            out.append((item, sc.combined))
+        look_cut = self.look_cutoff([sc.look for _, sc in scored if sc.look is not None])
+        text_cut = self.text_cutoff([sc.text for _, sc in scored if sc.text is not None])
+        out = [(item, sc.combined) for item, sc in scored if self.passes(sc, look_cut, text_cut)]
         out.sort(key=lambda t: -t[1])
         return out
+
+
+class StreamSelector:
+    """Matcher.select for candidates that arrive one at a time.
+
+    Colour is a plain pass/fail, so it is decided on the spot. "Looks similar"
+    and descriptions keep the best share of the pool, which needs a feel for
+    the pool first: the first WARMUP candidates are held back, then the
+    cutoffs are kept up to date as more scores come in.
+    """
+
+    WARMUP = 30
+
+    def __init__(self, matcher: Matcher):
+        self.m = matcher
+        self.looks: list[float] = []
+        self.texts: list[float] = []
+        self.held: list = []
+        self.cuts: Optional[tuple[float, float]] = None
+        self.seen = 0
+        self.passed = 0
+
+    def _cuts(self) -> tuple[float, float]:
+        return self.m.look_cutoff(self.looks), self.m.text_cutoff(self.texts)
+
+    def _release(self, cuts: tuple[float, float]) -> list:
+        out = [(item, sc.combined) for item, sc in self.held if self.m.passes(sc, *cuts)]
+        self.held = []
+        self.passed += len(out)
+        return out
+
+    def add(self, item, sc: Score) -> list:
+        """Offer one scored candidate; returns the [(item, combined)] now accepted."""
+        self.seen += 1
+        if not self.m.relative or sc.look is None:  # nothing to learn from the pool first
+            ok = self.m.passes(sc, *self._cuts())
+            self.passed += ok
+            return [(item, sc.combined)] if ok else []
+        if sc.look is not None:
+            self.looks.append(sc.look)
+        if sc.text is not None:
+            self.texts.append(sc.text)
+        self.held.append((item, sc))
+        n = max(len(self.looks), len(self.texts))
+        if n < self.WARMUP:
+            return []
+        if self.cuts is None or n % 10 == 0:
+            self.cuts = self._cuts()
+        return self._release(self.cuts)
+
+    def flush(self) -> list:
+        """The source ran dry: decide whatever is still held back."""
+        if not self.held:
+            return []
+        return self._release(self._cuts())

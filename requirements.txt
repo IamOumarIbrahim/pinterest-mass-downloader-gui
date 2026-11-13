@@ -5,7 +5,10 @@ numpy
 customtkinter>=5.2
 qrcode>=7.4
 
+imageio-ffmpeg            # Pinterest serves videos as streams; ffmpeg saves them as .mp4
+
 # Optional, but recommended
 tkinterdnd2>=0.4          # drag & drop a reference picture onto the window
 cryptography>=41          # "secure mode" for one-tap Share buttons on the phone
-imageio-ffmpeg            # video thumbnails on the phone + rare HLS-only videos
+onnxruntime>=1.17         # smart matching: understands what a picture shows
+tokenizers>=0.15          #   (the ~150 MB model itself downloads on first use)

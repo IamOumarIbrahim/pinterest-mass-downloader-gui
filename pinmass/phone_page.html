@@ -55,6 +55,19 @@ button:disabled{opacity:.4}
   z-index:20;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw;text-align:center}
 .toast.show{opacity:1}
 .hint{color:var(--muted);font-size:12px;text-align:center;padding:0 16px 8px}
+.ctl{margin:12px 16px 0;padding:12px;border-radius:16px;background:var(--card);border:1px solid var(--line)}
+.ctl input,.ctl select{font:inherit;color:inherit;background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:11px 12px;min-width:0}
+.ctl input{width:100%;font-size:16px}
+.ctl .row{display:flex;gap:8px;margin-top:8px;align-items:center}
+.ctl .row select{flex:1;padding:11px 8px}
+#kind{flex:1.6}
+.ctl .row button{flex:none;padding:11px 14px;white-space:nowrap}
+.job{margin-top:10px;font-size:13px;color:var(--muted)}
+.job .line{display:flex;gap:8px;align-items:center}
+.job .line span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.job .line button{padding:5px 12px;font-size:12px}
+.meter{height:6px;border-radius:3px;background:var(--card2);overflow:hidden;margin-top:8px}
+.meter i{display:block;height:100%;width:0;background:var(--accent);transition:width .3s}
 </style>
 </head>
 <body>
@@ -65,6 +78,19 @@ button:disabled{opacity:.4}
   <button id="selectBtn" style="display:none">Select</button>
 </header>
 <div id="banner"></div>
+<section class="ctl" id="ctl">
+  <input id="q" type="search" placeholder="Search…" enterkeyhint="search" autocomplete="off" autocapitalize="off">
+  <div class="row" id="getRow" style="display:none">
+    <select id="kind" aria-label="What to download"><option value="image">Pictures</option><option value="video">Videos</option><option value="gif">GIFs</option></select>
+    <select id="n" aria-label="How many"><option>10</option><option selected>30</option><option>50</option><option>100</option><option>200</option></select>
+    <button class="primary" id="get">Download to PC</button>
+  </div>
+  <div class="row"><button id="mine" style="flex:1">Find in my downloads</button></div>
+  <div class="job" id="job" style="display:none">
+    <div class="line"><span id="jobText"></span><button id="jobStop">Stop</button></div>
+    <div class="meter"><i id="jobBar"></i></div>
+  </div>
+</section>
 <main id="main"></main>
 <div class="bar" id="bar"><span class="count" id="selCount">0 selected</span>
   <button id="selCancel">Cancel</button><button class="primary" id="selShare">Share</button></div>
@@ -97,6 +123,19 @@ function toast(msg, ms = 2200) {
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), ms);
 }
 
+// keeps retrying while the phone can't reach the PC (Wi-Fi blip, phone woke from sleep)
+async function api(url) {
+  for (let tries = 0; ; tries++) {
+    try {
+      const r = await fetch(url, {cache: "no-store"});
+      if (r.status == 403) { location.reload(); return new Promise(() => {}); }
+      if (r.ok) { if (tries) toast("Reconnected", 1500); return await r.json(); }
+    } catch (e) {}
+    toast("Reconnecting to your PC…", 4000);
+    await new Promise(res => setTimeout(res, Math.min(2000 + tries * 1000, 8000)));
+  }
+}
+
 function banner() {
   if (secure || !HTTPS_URL) { $("banner").innerHTML = ""; return; }
   $("banner").innerHTML = `<div class="banner">Long-press any picture to share or copy it.
@@ -106,9 +145,10 @@ function banner() {
 
 async function showAlbums() {
   album = null; selecting = false; selected.clear(); syncSelect();
+  $("ctl").style.display = "";
   $("title").textContent = "Your downloads"; $("back").style.display = "none";
   $("logo").style.display = ""; $("selectBtn").style.display = "none";
-  const r = await fetch("/api/albums"); const d = await r.json();
+  const d = await api("/api/albums");
   const main = $("main");
   if (!d.albums.length || !d.albums[0].count) {
     main.innerHTML = `<div class="empty">Nothing here yet.<br>Download something on your PC and pull to refresh.</div>`; return;
@@ -121,17 +161,76 @@ async function showAlbums() {
   main.querySelectorAll(".album").forEach(el => el.onclick = () => openAlbum(list[+el.dataset.i]));
 }
 
+const itemsUrl = a => a.search !== undefined ? "/api/search?q=" + encodeURIComponent(a.search)
+                                              : "/api/items?album=" + encodeURIComponent(a.id);
 async function openAlbum(a) {
   album = a; $("title").textContent = a.name; $("back").style.display = ""; $("logo").style.display = "none";
-  $("selectBtn").style.display = "";
-  history.pushState({album: a.id}, "", "#" + encodeURIComponent(a.id));
-  const r = await fetch("/api/items?album=" + encodeURIComponent(a.id)); items = (await r.json()).items;
+  $("selectBtn").style.display = ""; $("ctl").style.display = "none";
+  history.pushState({album: a.id}, "", a.search !== undefined ? "#" : "#" + encodeURIComponent(a.id));
+  $("main").innerHTML = `<div class="empty">Looking…</div>`;
+  items = (await api(itemsUrl(a))).items;
   render();
 }
 
+// ── search your downloads / start a download on the PC ──
+let polling = null, lastFinished = null;
+$("mine").onclick = () => {
+  const q = $("q").value.trim();
+  if (!q) { toast("Type what to look for first."); $("q").focus(); return; }
+  $("q").blur(); openAlbum({id: "", name: `“${q}”`, search: q});
+};
+$("q").addEventListener("keydown", e => { if (e.key == "Enter") $("mine").click(); });
+$("get").onclick = async () => {
+  const q = $("q").value.trim();
+  if (!q) { toast("Type what to download first."); $("q").focus(); return; }
+  const body = {query: q, image: 0, video: 0, gif: 0}; body[$("kind").value] = +$("n").value;
+  $("get").disabled = true;
+  try {
+    const r = await fetch("/api/download", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const d = await r.json();
+    if (d.ok) { toast("Your PC is on it."); $("q").value = ""; $("q").blur(); poll(true); }
+    else toast(d.error || "Couldn't start that.", 4000);
+  } catch (e) { toast("Couldn't reach your PC."); }
+  $("get").disabled = false;
+};
+$("jobStop").onclick = () => fetch("/api/stop", {method: "POST"}).catch(() => {});
+async function poll(soon) {
+  clearTimeout(polling);
+  let d = null;
+  try { const r = await fetch("/api/status", {cache: "no-store"}); if (r.ok) d = await r.json(); } catch (e) {}
+  if (d) {
+    $("getRow").style.display = d.can_download ? "" : "none";
+    $("q").placeholder = d.can_download ? "Search Pinterest or your downloads" : "Search your downloads";
+    const busy = d.running || d.waiting > 0;
+    $("job").style.display = busy ? "" : "none";
+    if (busy) {
+      const more = d.waiting ? ` (+${d.waiting} waiting)` : "";
+      $("jobText").textContent = d.running ? `${d.query}: ${d.phase || "working…"}${more}` : `Starting…${more}`;
+      $("jobBar").style.width = (d.total ? Math.round(100 * d.done / d.total) : 0) + "%";
+    }
+    if (lastFinished !== null && d.finished > lastFinished) {   // something just finished: show it
+      toast(d.last || "Done", 3000);
+      if (!album && !$("viewer").classList.contains("show")) showAlbums();
+    }
+    if (d.finished !== undefined) lastFinished = d.finished;
+    soon = busy;
+  }
+  if (!document.hidden) polling = setTimeout(poll, soon ? 1200 : 8000);
+}
+
+// coming back to the tab after a while: pick up new downloads, retry broken thumbnails
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", async () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  poll();
+  if (Date.now() - hiddenAt < 30000 || $("viewer").classList.contains("show") || selecting) return;
+  if (album) { items = (await api(itemsUrl(album))).items; render(); }
+  else showAlbums();
+});
+
 function render() {
   const main = $("main");
-  if (!items.length) { main.innerHTML = `<div class="empty">This folder is empty.</div>`; return; }
+  if (!items.length) { main.innerHTML = `<div class="empty">${album && album.search !== undefined ? "Nothing in your downloads matches that." : "This folder is empty."}</div>`; return; }
   main.innerHTML = `<div class="grid ${selecting ? "selecting" : ""}" id="grid">${items.map((it, i) => `
     <div class="tile ${selected.has(i) ? "sel" : ""}" data-i="${i}"><img loading="lazy" src="${thumbUrl(it)}" alt="">
     ${it.kind != "image" ? `<span class="badge">${it.kind == "video" ? "▶ video" : "GIF"}</span>` : ""}<span class="check"></span></div>`).join("")}</div>`;
@@ -236,6 +335,7 @@ function esc(s) { return s.replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">"
 const startAlbum = decodeURIComponent(location.hash.slice(1));
 if (location.search.includes("t=")) history.replaceState(null, "", "/" + location.hash);
 banner();
+poll();
 showAlbums().then(() => {
   const a = lastAlbums.find(x => x.id === startAlbum && x.count);
   if (startAlbum && a) openAlbum(a);

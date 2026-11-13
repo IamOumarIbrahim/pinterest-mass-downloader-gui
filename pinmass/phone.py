@@ -34,6 +34,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from . import library as store
 from .media import find_ffmpeg
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
@@ -159,6 +160,25 @@ class Library:
                             "cover": self._entry(files[0])["path"]})
         return out
 
+    def search(self, text: str) -> list[dict]:
+        """Downloads under this folder that match *text* (by word, and by
+        meaning when the smart model is installed)."""
+        clip = None
+        try:
+            from . import smart
+            clip = smart.get() if smart.installed() else None
+        except Exception:
+            clip = None
+        out = []
+        for it in store.shared().search(text, 300, clip=clip):
+            try:
+                inside = os.path.commonpath([it.path, self.root]) == self.root
+            except ValueError:
+                inside = False
+            if inside and os.path.isfile(it.path):
+                out.append(self._entry(it.path))
+        return out
+
     def items(self, album: str) -> list[dict]:
         folder = self.root if not album else self.resolve(album)
         if not folder or not os.path.isdir(folder):
@@ -202,9 +222,11 @@ class Library:
 # ── HTTP ────────────────────────────────────────────────────────────────────
 class Handler(BaseHTTPRequestHandler):
     server_version = "PinterestMassDownloader"
+    timeout = 120  # drop stalled connections instead of holding a thread forever
     lib: Library
     token: str
     https_url: str | None = None
+    control = None   # submit()/status()/stop(); None = this server can't start downloads
 
     def log_message(self, *_):  # keep the console quiet
         pass
@@ -252,6 +274,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"root": self.lib.root, "albums": self.lib.albums()})
         elif path == "/api/items":
             self._json({"items": self.lib.items((q.get("album") or [""])[0])})
+        elif path == "/api/search":
+            self._json({"items": self.lib.search((q.get("q") or [""])[0])})
+        elif path == "/api/status":
+            st = self.control.status() if self.control else {}
+            self._json(dict(st, can_download=self.control is not None))
         elif path.startswith("/thumb/"):
             f = self.lib.resolve(path[len("/thumb/"):])
             data = self.lib.thumb(f) if f and os.path.isfile(f) else None
@@ -265,6 +292,30 @@ class Handler(BaseHTTPRequestHandler):
                 self._file(f, "dl" in q)
             else:
                 self._send(404, b"", "text/plain")
+        else:
+            self._send(404, b"", "text/plain")
+
+    def do_POST(self):
+        url = urllib.parse.urlsplit(self.path)
+        if not self._authed(urllib.parse.parse_qs(url.query)):
+            self._send(403, b"", "text/plain")
+            return
+        try:
+            size = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(min(size, 4096)) or b"{}") if size else {}
+            if not isinstance(body, dict):
+                raise ValueError
+        except (ValueError, OSError):
+            self._send(400, b"", "text/plain")
+            return
+        if self.control is None:
+            self._json({"ok": False, "error": "Downloads can't be started from here."})
+        elif url.path == "/api/download":
+            error = self.control.submit(str(body.get("query") or "")[:200], body)
+            self._json({"ok": error is None, "error": error or ""})
+        elif url.path == "/api/stop":
+            self.control.stop()
+            self._json({"ok": True})
         else:
             self._send(404, b"", "text/plain")
 
@@ -322,15 +373,85 @@ display:grid;place-items:center;height:90vh;text-align:center">
 <b>Pinterest Mass Downloader → Phone</b> on your PC.</p></div>"""
 
 
+class Server(ThreadingHTTPServer):
+    # Windows lets a second program bind a port that is "reusable", and then
+    # quietly sends the phone to whichever copy got there first. Refuse instead.
+    allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+
+
+class TLSServer(Server):
+    """HTTPS server that does the TLS handshake on the per-connection thread.
+
+    Wrapping the listening socket would run the handshake inside accept() on
+    the single serving thread, so one phone that connects and never finishes
+    the handshake (screen locked, cert warning left open, speculative
+    connection) would freeze the whole server.
+    """
+
+    def __init__(self, addr, handler, ctx: ssl.SSLContext):
+        super().__init__(addr, handler)
+        self.ctx = ctx
+
+    def finish_request(self, request, client_address):
+        request.settimeout(15)
+        try:
+            tls = self.ctx.wrap_socket(request, server_side=True)
+        except (OSError, ssl.SSLError):
+            return
+        try:
+            tls.settimeout(Handler.timeout)
+            self.RequestHandlerClass(tls, client_address, self)
+        except (OSError, ssl.SSLError):
+            pass
+        finally:
+            try:
+                tls.close()
+            except OSError:
+                pass
+
+
+class _KeepAwake:
+    """Stops Windows from sleeping while sharing is on (the display may still turn off)."""
+
+    def __init__(self):
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self):
+        if os.name != "nt" or self._thread:
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        set_state = ctypes.windll.kernel32.SetThreadExecutionState
+        # the request belongs to this thread, so it stays alive until stop()
+        while not self._stop.is_set():
+            set_state(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+            self._stop.wait(60)
+        set_state(ES_CONTINUOUS)
+
+    def stop(self):
+        self._stop.set()
+        self._thread = None
+
+
 class PhoneServer:
     """Runs the gallery on a background thread. Call start()/stop()."""
 
-    def __init__(self, folder: str, token: str, port: int = 8765, https: bool = True):
+    def __init__(self, folder: str, token: str, port: int = 8765, https: bool = True,
+                 control=None):
         self.folder = folder
         self.token = token
+        self.control = control
         self.port = port
         self.want_https = https
         self._servers: list[ThreadingHTTPServer] = []
+        self._awake = _KeepAwake()
         self.ip = lan_ip()
 
     @property
@@ -351,24 +472,25 @@ class PhoneServer:
         lib = Library(self.folder)
         https_base = f"https://{self.ip}:{self.port + 1}"
         cert = ensure_cert() if self.want_https else None
-        attrs = {"lib": lib, "token": self.token, "https_url": https_base if cert else None}
+        attrs = {"lib": lib, "token": self.token, "https_url": https_base if cert else None,
+                 "control": self.control}
         handler = type("H", (Handler,), attrs)
-        http = ThreadingHTTPServer(("0.0.0.0", self.port), handler)
+        http = Server(("0.0.0.0", self.port), handler)
         self._servers.append(http)
         if cert:
             try:
-                tls = ThreadingHTTPServer(("0.0.0.0", self.port + 1), handler)
                 ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ctx.load_cert_chain(*cert)
-                tls.socket = ctx.wrap_socket(tls.socket, server_side=True)
-                self._servers.append(tls)
+                self._servers.append(TLSServer(("0.0.0.0", self.port + 1), handler, ctx))
             except (OSError, ssl.SSLError):
                 pass
         for s in self._servers:
             s.daemon_threads = True
             threading.Thread(target=s.serve_forever, daemon=True).start()
+        self._awake.start()
 
     def stop(self):
+        self._awake.stop()
         for s in self._servers:
             s.shutdown()
             s.server_close()
@@ -394,9 +516,11 @@ def serve_forever(folder: str, port: int = 8765):
     if not cfg.get("phone_token"):
         cfg["phone_token"] = new_token()
         settings.save(cfg)
-    srv = PhoneServer(folder, cfg["phone_token"], port)
+    from .remote import Control
+    srv = PhoneServer(folder, cfg["phone_token"], port, control=Control(folder, cfg))
     srv.start()
     print(f"Sharing {os.path.abspath(folder)}")
+    print("Searches started on the phone are downloaded into this folder.")
     print(f"On your phone (same Wi-Fi) open:\n  {srv.url}")
     try:
         q = qr_image(srv.url)

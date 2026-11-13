@@ -87,7 +87,7 @@ def test_look_similarity_ranks_resized_copy_above_unrelated():
 def test_matcher_scores_bytes(tmp_path):
     ref_path = tmp_path / "ref.png"
     REF.save(ref_path)
-    m = Matcher(MatchSettings(reference=str(ref_path), look=True, colors=True))
+    m = Matcher(MatchSettings(reference=str(ref_path), look=True, colors=True, smart=False))
     import io
     buf = io.BytesIO()
     REF.save(buf, "JPEG")
@@ -121,10 +121,81 @@ def test_look_cutoff_is_relative_to_the_pool(tmp_path):
     from pinmass.matching import Score
     ref_path = tmp_path / "ref.png"
     REF.save(ref_path)
-    m = Matcher(MatchSettings(reference=str(ref_path), look=True, closeness=50))
+    m = Matcher(MatchSettings(reference=str(ref_path), look=True, closeness=50, smart=False))
     pool = [(i, Score(look=50 + i * 0.2)) for i in range(100)]  # 50..69.8
     kept = m.select(pool)
     assert 20 <= len(kept) <= 45                  # roughly the top third
     assert kept[0][0] == 99                       # best first
     low = [(i, Score(look=30 + i * 0.1)) for i in range(100)]  # all under the floor
     assert m.select(low) == []
+
+
+# ── smart (CLIP) matching, with a stand-in model ────────────────────────────
+class FakeClip:
+    """Pictures become one of three unit vectors depending on their colour;
+    phrases map onto the same axes."""
+    AXES = {"red": 0, "blue": 1, "a picture": 2}
+
+    def image(self, im):
+        r, g, b = np.asarray(im.convert("RGB").resize((1, 1))).reshape(3).astype(float)
+        v = np.array([r, b, 60.0])
+        return (v / np.linalg.norm(v)).astype(np.float32)
+
+    def text(self, phrase):
+        v = np.zeros(3, dtype=np.float32)
+        v[next((i for k, i in self.AXES.items() if k in phrase), 2)] = 1
+        return v
+
+
+def solid(rgb):
+    return Image.new("RGB", (32, 32), rgb)
+
+
+def test_smart_look_uses_fixed_thresholds(tmp_path):
+    from pinmass.matching import SMART_FLOOR, SMART_TOP
+    ref = tmp_path / "ref.png"
+    solid((250, 10, 10)).save(ref)
+    m = Matcher(MatchSettings(reference=str(ref), look=True, closeness=50), FakeClip())
+    assert m.modes() == ["smart look-alike"] and not m.relative
+    assert m.look_cutoff([]) == (SMART_FLOOR + SMART_TOP) / 2      # no pool needed
+    same, other = m.score(solid((240, 20, 10))), m.score(solid((10, 10, 250)))
+    assert same.look > 95 > m.look_cutoff([]) > other.look
+    kept = m.select([("same", same), ("other", other)])
+    assert [k for k, _ in kept] == ["same"]
+
+
+def test_description_keeps_wanted_and_drops_unwanted():
+    m = Matcher(MatchSettings(describe="red, no blue", closeness=0), FakeClip())
+    assert m.modes() == ["description"] and m.terms == (["red"], ["blue"])
+    red, blue = m.score(solid((250, 10, 10))), m.score(solid((10, 10, 250)))
+    assert red.look is None and red.text > 60 > blue.text
+    assert [k for k, _ in m.select([("red", red), ("blue", blue)])] == ["red"]
+    only_no = Matcher(MatchSettings(describe="no blue"), FakeClip())
+    grey = only_no.score(solid((5, 5, 5)))
+    assert [k for k, _ in only_no.select([("grey", grey), ("blue", only_no.score(solid((10, 10, 250))))])] == ["grey"]
+
+
+def test_description_needs_the_model_and_smart_can_be_switched_off(tmp_path):
+    assert MatchSettings(describe="cats").active
+    assert not MatchSettings(describe="cats", smart=False).active
+    ref = tmp_path / "ref.png"
+    REF.save(ref)
+    m = Matcher(MatchSettings(reference=str(ref), look=True, smart=False), FakeClip())
+    assert m.modes() == ["look-alike"] and m.relative and m.clip is None
+
+
+def test_parse_description():
+    from pinmass.smart import parse_description
+    assert parse_description("watercolor, no text; not blurry\n-people, cozy room") == (
+        ["watercolor", "cozy room"], ["text", "blurry", "people"])
+    assert parse_description("  ") == ([], [])
+
+
+def test_picks_steer_the_matcher_and_rejects_push_away():
+    red, blue, purple = solid((250, 10, 10)), solid((10, 10, 250)), solid((160, 10, 160))
+    m = Matcher(MatchSettings(examples=[red], rejects=[blue], closeness=30), FakeClip())
+    assert m.modes() == ["your picks"] and MatchSettings(examples=[red]).active
+    assert m.score(red).look > 95
+    plain = Matcher(MatchSettings(examples=[red], closeness=30), FakeClip())
+    assert m.score(blue).look < plain.score(blue).look      # near a reject: marked down
+    assert m.score(purple).look <= plain.score(purple).look

@@ -13,11 +13,13 @@ from tkinter import filedialog
 import customtkinter as ctk
 from PIL import Image, ImageDraw, ImageGrab
 
-from . import APP_NAME, __version__, settings
+from . import APP_NAME, __version__, library, settings
 from .matching import MatchSettings, Palette, allowed_ranges, extract_palette
 from .media import fetch_bytes
+from . import scraper
 from .scraper import is_url
-from .worker import KINDS, LABEL, Event, Job, Worker
+from .worker import (KINDS, LABEL, Event, Job, Worker, follow_job, picks_job, safe_name,
+                     similar_job)
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -40,17 +42,12 @@ LOG_COLOR = {"info": None, "success": "#1DB954", "warning": "#E0A100", "error": 
 TILE = 132
 FONT = "Segoe UI"
 
+SIZES = {"Any size": 0, "600 px+": 600, "1000 px+": 1000, "1500 px+": 1500, "2000 px+": 2000}
+SHAPE_NAMES = {"Any": "any", "Tall": "tall", "Wide": "wide", "Square": "square"}
+
 
 def font(size=13, weight="normal"):
     return ctk.CTkFont(family=FONT, size=size, weight=weight)
-
-
-def safe_name(text: str) -> str:
-    if is_url(text):
-        parts = [p for p in text.split("?")[0].split("/") if p]
-        text = " ".join(parts[-2:]) if len(parts) >= 2 else "board"
-    name = "".join(c for c in text if c.isalnum() or c in " _-").strip()
-    return name[:60] or f"download_{int(time.time())}"
 
 
 def describe_tolerance(v: float) -> str:
@@ -133,6 +130,36 @@ class CountRow(ctk.CTkFrame):
         self.slider.set(min(v, self.maximum))
 
 
+class PhoneControl:
+    """Lets the phone page start searches in this window's queue.
+
+    The phone server calls these from its own threads; anything that touches
+    the window is handed to the main thread through ui_q.
+    """
+
+    def __init__(self, app: "App"):
+        self.app = app
+        self.state = {"running": False, "query": "", "phase": "", "done": 0, "total": 0,
+                      "waiting": 0, "finished": 0, "last": ""}
+
+    def submit(self, query: str, counts: dict):
+        from .remote import clean_counts
+        query = " ".join(query.split())
+        counts = clean_counts(counts)
+        if not query:
+            return "Type something to search for."
+        if not any(counts.values()):
+            return "Ask for at least one picture, video or GIF."
+        self.app.ui_q.put(lambda: self.app.remote_search(query, counts))
+        return None
+
+    def status(self) -> dict:
+        return dict(self.state)
+
+    def stop(self):
+        self.app.ui_q.put(self.app.stop)
+
+
 class App(*_Base):
     def __init__(self):
         super().__init__()
@@ -144,6 +171,12 @@ class App(*_Base):
         self.cfg = settings.load()
         ctk.set_appearance_mode(self.cfg.get("appearance", "System"))
         self.title(APP_NAME)
+        icon = Path(__file__).resolve().parent.parent / "assets" / "icon.ico"
+        if icon.exists():
+            try:
+                self.iconbitmap(str(icon))
+            except Exception:
+                pass
         self.geometry("1320x860")
         self.minsize(1080, 700)
         self.configure(fg_color=BG)
@@ -160,9 +193,16 @@ class App(*_Base):
         self.palette_edited = False
         self.tiles: list[ctk.CTkFrame] = []
         self.tile_images: list = []
+        self.lib = library.shared()
+        self.indexing = False
+        self.cands: list[dict] = []        # preview candidates: {ev, tile, cap, picked}
+        self.pick_job: Job | None = None   # the preview the candidates came from
         self.counters = {k: 0 for k in KINDS}
         self.phone = None
         self.phone_win = None
+        self.closing = False
+        self._lib_token = None
+        self.remote = PhoneControl(self)
         if not self.cfg.get("phone_token"):
             from .phone import new_token
             self.cfg["phone_token"] = new_token()
@@ -180,6 +220,9 @@ class App(*_Base):
         self.after(60, self._pump)
         if self.cfg.get("phone_autostart"):
             self.after(800, self._phone_start)
+        if self.cfg.get("follow_autocheck", True):
+            # at most once every few hours, so reopening the app doesn't hammer Pinterest
+            self.after(1500, lambda: self.check_follows(older_than=3 * 3600))
 
     # ── layout ──────────────────────────────────────────────────────────
     def _build(self):
@@ -204,6 +247,10 @@ class App(*_Base):
                                        corner_radius=17, font=font(13, "bold"), fg_color=CARD_2,
                                        hover_color=BORDER, text_color=TEXT, command=self.open_phone)
         self.phone_btn.pack(side="right")
+        self.update_btn = ctk.CTkButton(header, text="", height=34, corner_radius=17,
+                                        font=font(12, "bold"), fg_color="#1DB954",
+                                        hover_color="#17a349", text_color="white")
+        threading.Thread(target=self._check_update, daemon=True).start()
 
         self._build_left()
         self._build_right()
@@ -229,7 +276,8 @@ class App(*_Base):
         self.search.pack(fill="x")
         self.search.bind("<Return>", lambda _: self.start())
         self.search.bind("<KeyRelease>", lambda _: self._update_mode_hint())
-        self.mode_hint = ctk.CTkLabel(c.body, text="", font=font(12), text_color=MUTED, anchor="w")
+        self.mode_hint = ctk.CTkLabel(c.body, text="", font=font(12), text_color=MUTED, anchor="w",
+                                      justify="left", wraplength=390)
         self.mode_hint.pack(fill="x", pady=(6, 0))
         self.recent_row = ctk.CTkFrame(c.body, fg_color="transparent", height=1)
         self._render_recent()
@@ -245,6 +293,27 @@ class App(*_Base):
         }
         for r in self.rows.values():
             r.pack(fill="x", pady=4)
+        qrow = ctk.CTkFrame(c.body, fg_color="transparent")
+        qrow.pack(fill="x", pady=(10, 0))
+        ctk.CTkLabel(qrow, text="Shape", font=font(12), text_color=MUTED).pack(side="left")
+        self.shape = ctk.CTkSegmentedButton(
+            qrow, values=list(SHAPE_NAMES), font=font(12), selected_color=ACCENT,
+            selected_hover_color=ACCENT_HOVER, height=28)
+        self.shape.set(next((n for n, v in SHAPE_NAMES.items() if v == self.cfg.get("shape")), "Any"))
+        self.shape.pack(side="left", padx=(8, 0))
+        self.size = ctk.CTkOptionMenu(
+            qrow, values=list(SIZES), width=110, height=28, font=font(12), fg_color=CARD_2,
+            button_color=CARD_2, button_hover_color=BORDER, text_color=TEXT,
+            dropdown_font=font(12))
+        self.size.set(next((n for n, v in SIZES.items() if v == self.cfg.get("min_side")), "Any size"))
+        self.size.pack(side="right")
+        self.pick_first = ctk.BooleanVar(value=bool(self.cfg.get("pick_first")))
+        ctk.CTkSwitch(c.body, text="Let me pick first", variable=self.pick_first,
+                      progress_color=ACCENT, font=font(12, "bold"), text_color=TEXT,
+                      command=self._update_go).pack(anchor="w", pady=(10, 0))
+        ctk.CTkLabel(c.body, text="Shows small previews. You click the ones you want, and only "
+                                  "those are downloaded.", font=font(11), text_color=MUTED,
+                     anchor="w", justify="left", wraplength=390).pack(fill="x", pady=(2, 0))
 
         # Reference matching
         c = Card(scroll, "Match a picture", "optional")
@@ -266,6 +335,26 @@ class App(*_Base):
         ctk.CTkSwitch(c.body, text="Put each search in its own folder", variable=self.subfolders,
                       progress_color=ACCENT, font=font(12), text_color=TEXT).pack(
             anchor="w", pady=(10, 0))
+        self.skip_owned = ctk.BooleanVar(value=bool(self.cfg.get("skip_owned", True)))
+        ctk.CTkSwitch(c.body, text="Skip pictures I already have (in any folder)",
+                      variable=self.skip_owned, progress_color=ACCENT, font=font(12),
+                      text_color=TEXT).pack(anchor="w", pady=(8, 0))
+
+        # Account
+        c = Card(scroll, "Pinterest login", "optional")
+        c.pack(fill="x", pady=(0, 12))
+        self.login_lbl = ctk.CTkLabel(c.body, text="", font=font(12), text_color=MUTED,
+                                      anchor="w", justify="left", wraplength=390)
+        self.login_lbl.pack(fill="x")
+        row = ctk.CTkFrame(c.body, fg_color="transparent")
+        row.pack(fill="x", pady=(8, 0))
+        ctk.CTkButton(row, text="Use cookies file…", height=30, corner_radius=15, font=font(12),
+                      fg_color=CARD_2, hover_color=BORDER, text_color=TEXT,
+                      command=self._login_file).pack(side="left")
+        self.logout_btn = ctk.CTkButton(row, text="Sign out", height=30, width=80, corner_radius=15,
+                                        font=font(12), fg_color="transparent", hover_color=BORDER,
+                                        text_color=MUTED, command=lambda: self._set_login(None))
+        self._set_login(settings.load_cookies(), quiet=True)
 
         # Advanced
         c = Card(scroll, "Speed")
@@ -332,6 +421,29 @@ class App(*_Base):
                                  text_color=TEXT, border_color=MUTED)
             cb.pack(side="left", padx=(0, 18))
             self.match_boxes[key] = cb
+
+        # describe it in words (smart model)
+        from . import smart
+        self.smart_ok = smart.available()
+        self.describe = ctk.StringVar(value=self.cfg.get("describe", "") if self.smart_ok else "")
+        self.smart = ctk.BooleanVar(value=bool(self.cfg.get("smart", True)) and self.smart_ok)
+        self.describe_box = ctk.CTkFrame(body, fg_color="transparent")
+        if self.smart_ok:
+            self.describe_box.pack(fill="x", pady=(12, 0))
+        self.describe_entry = ctk.CTkEntry(
+            self.describe_box, textvariable=self.describe, height=36, corner_radius=10,
+            font=font(13), border_color=BORDER, fg_color=CARD_2,
+            placeholder_text="Or describe it: line drawing, no words")
+        self.describe_entry.pack(fill="x")
+        self.describe_entry.bind("<KeyRelease>", lambda _: self._refresh_match_ui())
+        self.describe_entry.bind("<Return>", lambda _: self.start())
+        srow = ctk.CTkFrame(self.describe_box, fg_color="transparent")
+        srow.pack(fill="x", pady=(8, 0))
+        ctk.CTkSwitch(srow, text="Smart matching", variable=self.smart, progress_color=ACCENT,
+                      font=font(12, "bold"), text_color=TEXT,
+                      command=self._refresh_match_ui).pack(side="left")
+        self.smart_lbl = ctk.CTkLabel(srow, text="", font=font(11), text_color=MUTED, anchor="e")
+        self.smart_lbl.pack(side="right")
 
         # look options
         self.look_box = ctk.CTkFrame(body, fg_color="transparent")
@@ -426,8 +538,30 @@ class App(*_Base):
         gal.grid(row=1, column=0, sticky="nsew", pady=12)
         gal.grid_columnconfigure(0, weight=1)
         gal.grid_rowconfigure(1, weight=1)
-        ctk.CTkLabel(gal, text="Downloaded", font=font(15, "bold"), text_color=TEXT).grid(
-            row=0, column=0, sticky="w", padx=16, pady=(12, 0))
+        head = ctk.CTkFrame(gal, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=16, pady=(12, 0))
+        self.gal_title = ctk.CTkLabel(head, text="Downloaded", font=font(15, "bold"),
+                                      text_color=TEXT)
+        self.gal_title.pack(side="left")
+        self.lib_search = ctk.CTkEntry(head, width=230, height=30, corner_radius=15,
+                                       font=font(12), border_color=BORDER, fg_color=CARD_2,
+                                       placeholder_text="🔍  Search your downloads")
+        self.lib_search.pack(side="right")
+        self.lib_search.bind("<Return>", lambda _: self.show_library(self.lib_search.get()))
+        self.pick_bar = ctk.CTkFrame(head, fg_color="transparent")
+        self.pick_go = ctk.CTkButton(self.pick_bar, text="Download picked", height=30, width=150,
+                                     corner_radius=15, font=font(12, "bold"), fg_color=ACCENT,
+                                     hover_color=ACCENT_HOVER, command=self.download_picked)
+        self.pick_go.pack(side="right")
+        self.pick_more = ctk.CTkButton(self.pick_bar, text="More like my picks", height=30,
+                                       width=10, corner_radius=15, font=font(12), fg_color=CARD_2,
+                                       hover_color=BORDER, text_color=TEXT,
+                                       command=self.more_like_picks)
+        self.pick_more.pack(side="right", padx=6)
+        for text, state in (("None", False), ("All", True)):
+            ctk.CTkButton(self.pick_bar, text=text, height=30, width=52, corner_radius=15,
+                          font=font(12), fg_color=CARD_2, hover_color=BORDER, text_color=TEXT,
+                          command=lambda s=state: self._pick_all(s)).pack(side="right", padx=(6, 0))
         self.gallery = ctk.CTkScrollableFrame(gal, fg_color=CARD,
                                               scrollbar_button_color=BORDER)
         self.gallery.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
@@ -445,7 +579,9 @@ class App(*_Base):
         tabs.grid(row=2, column=0, sticky="nsew")
         self.tabs = tabs
         tabs.add("Queue")
+        tabs.add("Following")
         tabs.add("Activity")
+        self._build_following(tabs.tab("Following"))
         self.queue_list = ctk.CTkScrollableFrame(tabs.tab("Queue"), fg_color=CARD)
         self.queue_list.pack(fill="both", expand=True)
         self.queue_empty = ctk.CTkLabel(
@@ -462,6 +598,108 @@ class App(*_Base):
         self.log("Ready. Type a keyword or paste a Pinterest link, then press Enter.", "success")
         self._refresh_match_ui()
 
+    def _check_update(self):
+        """Background: is there a newer release? (asks GitHub at most once a day)"""
+        from . import update
+        found = update.check(self.cfg, __version__)
+        if found:
+            version, url = found
+            self.ui_q.put(lambda: (
+                self.update_btn.configure(text=f"⬆  Version {version} is out",
+                                          command=lambda: __import__("webbrowser").open(url)),
+                self.update_btn.pack(side="right", padx=(0, 10))))
+
+    # ── following ───────────────────────────────────────────────────────
+    def _build_following(self, tab):
+        top = ctk.CTkFrame(tab, fg_color="transparent")
+        top.pack(fill="x", pady=(0, 6))
+        ctk.CTkButton(top, text="★  Follow this search", height=30, corner_radius=15,
+                      font=font(12, "bold"), fg_color=ACCENT, hover_color=ACCENT_HOVER,
+                      command=self.follow_current).pack(side="left")
+        ctk.CTkButton(top, text="Check all now", height=30, width=110, corner_radius=15,
+                      font=font(12), fg_color=CARD_2, hover_color=BORDER, text_color=TEXT,
+                      command=lambda: self.check_follows()).pack(side="left", padx=8)
+        self.follow_auto = ctk.BooleanVar(value=bool(self.cfg.get("follow_autocheck", True)))
+        ctk.CTkSwitch(top, text="Check when the app opens", variable=self.follow_auto,
+                      progress_color=ACCENT, font=font(12), text_color=TEXT,
+                      command=lambda: self.cfg.update(follow_autocheck=self.follow_auto.get())
+                      ).pack(side="right")
+        self.follow_list = ctk.CTkScrollableFrame(tab, fg_color=CARD)
+        self.follow_list.pack(fill="both", expand=True)
+        self._render_follows()
+
+    def _render_follows(self):
+        for w in self.follow_list.winfo_children():
+            w.destroy()
+        follows = self.lib.follows()
+        if not follows:
+            ctk.CTkLabel(
+                self.follow_list, font=font(12), text_color=MUTED, justify="center",
+                text="Follow a search or a board and the app fetches only what's new each time.\n"
+                     "Type it on the left, set how many to get per check, then press "
+                     "“Follow this search”.").pack(pady=16)
+            return
+        for f in follows:
+            row = ctk.CTkFrame(self.follow_list, fg_color=CARD_2, corner_radius=10)
+            row.pack(fill="x", pady=3, padx=2)
+            name = scraper.link_name(f.query) if is_url(f.query) else f.query
+            name = name if len(name) <= 44 else name[:42] + "…"
+            ctk.CTkLabel(row, text=name, font=font(13, "bold"), text_color=TEXT,
+                         anchor="w").pack(side="left", padx=12, pady=8)
+            if f.checked:
+                ago = max(0, time.time() - f.checked)
+                when = ("just now" if ago < 90 else f"{ago / 60:.0f} min ago" if ago < 5400
+                        else f"{ago / 3600:.0f} h ago" if ago < 172800 else f"{ago / 86400:.0f} days ago")
+                note = f"checked {when} · {f.last_new} new · {f.total} in all"
+            else:
+                note = "not checked yet"
+            ctk.CTkLabel(row, text=note, font=font(12), text_color=MUTED).pack(side="left")
+            ctk.CTkButton(row, text="✕", width=28, height=24, fg_color="transparent",
+                          hover_color=BORDER, text_color=MUTED,
+                          command=lambda f=f: (self.lib.unfollow(f.id), self._render_follows())
+                          ).pack(side="right", padx=6)
+            ctk.CTkButton(row, text="Check", width=64, height=24, fg_color=CARD, hover_color=BORDER,
+                          text_color=TEXT, font=font(12),
+                          command=lambda f=f: self.check_follows([f.id])).pack(side="right")
+
+    def follow_current(self):
+        """Follow what's in the search box, with the current counts, folder and quality."""
+        item = self._make_job()
+        if not item:
+            self.tabs.set("Following")
+            return
+        job: Job = item["job"]
+        self.lib.follow(job.query, job.out_dir, job.counts, job.min_side, job.shape)
+        self._remember(job.query)
+        self.search.delete(0, "end")
+        self._update_mode_hint()
+        self._render_follows()
+        self.log(f"Following “{job.query}”: only what's new is fetched from now on.", "success")
+        self.check_follows([f.id for f in self.lib.follows()
+                            if f.query == job.query and f.folder == job.out_dir])
+
+    def check_follows(self, only: list | None = None, older_than: float = 0):
+        """Queue a check for everything followed (or just the ids in *only*)."""
+        queued = {i.get("follow") for i in self.queue_items if i["status"] in ("Waiting", "Running")}
+        n = 0
+        for f in self.lib.follows():
+            if (only is not None and f.id not in only) or f.id in queued:
+                continue
+            if older_than and time.time() - f.checked < older_than:
+                continue
+            self.queue_items.append({"job": follow_job(f, self.lib, int(self.threads.get())),
+                                     "query": f"★ {f.query}", "folder": f.folder,
+                                     "status": "Waiting", "follow": f.id})
+            n += 1
+        if not n:
+            if only is None and not older_than:
+                self.status.configure(text="You're not following anything yet."
+                                      if not self.lib.follows() else "Already checking.")
+            return
+        self._render_queue()
+        self._update_go()
+        self._begin()
+
     # ── small UI helpers ────────────────────────────────────────────────
     def log(self, text: str, level: str = "info"):
         self.log_box.configure(state="normal")
@@ -477,9 +715,13 @@ class App(*_Base):
     def _update_mode_hint(self):
         q = self.search.get().strip()
         if not q:
-            self.mode_hint.configure(text="Keywords search all of Pinterest. Links download a board or pin.")
+            self.mode_hint.configure(text="Keywords search all of Pinterest. Links work too: "
+                                          "boards, sections, profiles, searches, pins.")
         elif is_url(q):
-            self.mode_hint.configure(text="🔗  Board / pin link detected")
+            kind = scraper.parse_link(q)[0] if "pin.it/" not in q else "pin"
+            self.mode_hint.configure(
+                text=f"🔗  {scraper.LINK_NAMES[kind]}" if kind in scraper.LINK_NAMES
+                else "⚠  Not a board, profile, search or pin link")
         else:
             self.mode_hint.configure(text=f"🔍  Searching Pinterest for “{q}”")
 
@@ -502,6 +744,40 @@ class App(*_Base):
         self.search.delete(0, "end")
         self.search.insert(0, text)
         self._update_mode_hint()
+
+    def _set_login(self, cookies: dict | None, quiet: bool = False):
+        ok = scraper.signed_in(cookies)
+        if cookies and not ok and not quiet:
+            self.login_lbl.configure(
+                text="Those cookies aren't from a signed-in Pinterest session. Sign in to "
+                     "pinterest.com in your browser first, then export them again.",
+                text_color="#E0A100")
+            return
+        scraper.sign_in(cookies if ok else None)
+        if not quiet or not ok:
+            settings.save_cookies(cookies if ok else None)
+        if ok:
+            self.login_lbl.configure(text="✓  Signed in. Private boards and Pinterest's own "
+                                          "“more like this” are available.", text_color=TEXT)
+            self.logout_btn.pack(side="left", padx=8)
+        else:
+            self.login_lbl.configure(
+                text="Not signed in: everything public works. To reach your private boards, "
+                     "export pinterest.com's cookies from your browser (a “cookies.txt” "
+                     "extension does it) and choose the file here. It stays on this PC.",
+                text_color=MUTED)
+            self.logout_btn.pack_forget()
+
+    def _login_file(self):
+        p = filedialog.askopenfilename(
+            title="Cookies exported from your browser",
+            filetypes=[("Cookie exports", "*.txt *.json"), ("All files", "*.*")])
+        if not p:
+            return
+        try:
+            self._set_login(scraper.read_cookies(p))
+        except OSError as exc:
+            self.login_lbl.configure(text=f"Couldn't read that file: {exc}", text_color="#E0A100")
 
     def _browse(self):
         d = filedialog.askdirectory(title="Choose a download folder", initialdir=self.folder.get())
@@ -551,8 +827,8 @@ class App(*_Base):
             text = self.clipboard_get().strip()
         except Exception:
             return None
-        if self.focus_get() is self.search._entry:
-            return None  # normal text paste into the search box
+        if self.focus_get() in (self.search._entry, self.describe_entry._entry):
+            return None  # normal text paste into a text box
         if text.lower().startswith("http") and not is_url(text):
             data = fetch_bytes(text, limit=25 * 1024 * 1024)
             if data:
@@ -675,7 +951,15 @@ class App(*_Base):
             self.reset_btn.pack_forget()
         self.look_box.pack_forget()
         self.color_box.pack_forget()
-        if look:
+        described = self.smart.get() and bool(self.describe.get().strip())
+        if self.smart_ok:
+            from . import smart
+            self.describe_entry.configure(state="normal" if self.smart.get() else "disabled")
+            self.smart_lbl.configure(
+                text="understands what a picture shows" if smart.installed()
+                else f"{smart.TOTAL_MB} MB download on first use" if self.smart.get()
+                else "off: compares shapes and edges only")
+        if look or described:
             self.look_box.pack(fill="x", pady=(12, 0), before=self.match_hint)
             self.close_lbl.configure(text=describe_closeness(self.closeness.get()))
         if colors:
@@ -689,9 +973,10 @@ class App(*_Base):
                     lbl.configure(text=f"{s:.0%}  →  {lo:.0%}–{hi:.0%}")
         ms = self._match_settings()
         what = " and ".join(w for w, on in (("look like your picture", look and has_ref),
-                                            ("use these colors", colors and bool(self.palette)))
+                                            ("use these colors", colors and bool(self.palette)),
+                                            ("fit your description", described))
                             if on)
-        if not (look or colors):
+        if not (look or colors or described):
             hint = "Tick a box to download only pins that look like a picture or use its colors."
         elif not ms.active:
             hint = "Add a picture above, or pick colors, to start matching."
@@ -699,12 +984,17 @@ class App(*_Base):
             hint = f"✓  Only pins that {what} will be downloaded."
         self.match_hint.configure(text=hint)
 
+    def _quality(self) -> dict:
+        return {"min_side": SIZES.get(self.size.get(), 0),
+                "shape": SHAPE_NAMES.get(self.shape.get(), "any")}
+
     def _match_settings(self) -> MatchSettings:
         return MatchSettings(reference=self.cfg.get("reference") or None,
                              palette=self.palette.entries() if self.palette else None,
                              look=self.look.get(),
                              colors=self.colors.get(), color_tolerance=self.tolerance.get(),
-                             closeness=self.closeness.get())
+                             closeness=self.closeness.get(), smart=self.smart.get(),
+                             describe=self.describe.get().strip() if self.smart.get() else "")
 
     # ── queue ───────────────────────────────────────────────────────────
     def _make_job(self) -> dict | None:
@@ -721,8 +1011,31 @@ class App(*_Base):
         if self.subfolders.get():
             folder = os.path.join(folder, safe_name(q))
         return {"job": Job(query=q, out_dir=folder, counts=counts, match=self._match_settings(),
-                           threads=int(self.threads.get())),
+                           threads=int(self.threads.get()), preview=self.pick_first.get(),
+                           library=self.lib, skip_owned=self.skip_owned.get(),
+                           **self._quality()),
                 "query": q, "folder": folder, "status": "Waiting"}
+
+    def remote_search(self, query: str, counts: dict):
+        """A search sent from the phone: same settings as the window, its own counts."""
+        folder = self.folder.get().strip() or settings.DEFAULTS["folder"]
+        if self.subfolders.get():
+            folder = os.path.join(folder, safe_name(query))
+        job = Job(query=query, out_dir=folder, counts=counts, match=MatchSettings(),
+                  threads=int(self.threads.get()), library=self.lib,
+                  skip_owned=self.skip_owned.get(), **self._quality())
+        self.queue_items.append({"job": job, "query": f"📱 {query}", "folder": folder,
+                                 "status": "Waiting"})
+        self._remember(query)
+        self._render_queue()
+        self._update_go()
+        self.log(f"From your phone: “{query}”", "success")
+        self._begin()
+
+    def _remote_sync(self, **kw):
+        """Keep what the phone sees in step with the window."""
+        self.remote.state = dict(self.remote.state, **kw,
+                                 waiting=sum(i["status"] == "Waiting" for i in self.queue_items))
 
     def add_to_queue(self, auto: bool = False):
         item = self._make_job()
@@ -749,7 +1062,7 @@ class App(*_Base):
             self.queue_empty.pack(pady=20)
             return
         colours = {"Waiting": MUTED, "Running": ACCENT, "Done": "#1DB954", "Stopped": "#E0A100",
-                   "No results": "#E0A100"}
+                   "No results": "#E0A100", "Your pick": "#3B82F6", "Nothing new": MUTED}
         for item in self.queue_items:
             job: Job = item["job"]
             row = ctk.CTkFrame(self.queue_list, fg_color=CARD_2, corner_radius=10)
@@ -759,8 +1072,14 @@ class App(*_Base):
             parts = [f"{KIND_ICON[k]} {job.counts[k]}" for k in KINDS if job.counts[k]]
             if job.match.active:
                 parts.append("🎯 match")
+            if job.preview:
+                parts.append("👆 pick first")
+            if job.min_side or job.shape != "any":
+                parts.append("📐 " + " ".join(
+                    p for p in (job.shape if job.shape != "any" else "",
+                                f"{job.min_side}px+" if job.min_side else "") if p))
             ctk.CTkLabel(row, text="   ".join(parts), font=font(12), text_color=MUTED).pack(side="left")
-            if item["status"] in ("Waiting", "Done", "Stopped", "No results") and not (
+            if item["status"] != "Running" and not (
                     self.running and item is self.current):
                 ctk.CTkButton(row, text="✕", width=28, height=24, fg_color="transparent",
                               hover_color=BORDER, text_color=MUTED,
@@ -780,8 +1099,9 @@ class App(*_Base):
             self.go_btn.configure(text="Downloading…", state="disabled")
             return
         waiting = sum(1 for i in self.queue_items if i["status"] == "Waiting")
+        idle = "Show me what's there" if self.pick_first.get() else "Download"
         self.go_btn.configure(state="normal",
-                              text=f"Download queue ({waiting})" if waiting else "Download")
+                              text=f"Download queue ({waiting})" if waiting else idle)
 
     def _remember(self, q):
         recent = [q] + [r for r in self.cfg.get("recent", []) if r != q]
@@ -801,6 +1121,12 @@ class App(*_Base):
             return
         if self.search.get().strip():
             self.add_to_queue(auto=True)
+        self._begin()
+
+    def _begin(self):
+        """Run whatever is waiting in the queue."""
+        if self.running:
+            return
         if not any(i["status"] == "Waiting" for i in self.queue_items):
             if not self.queue_items:
                 self._make_job()  # shows the hint
@@ -808,6 +1134,7 @@ class App(*_Base):
                 self.status.configure(text="Everything in the queue is done. Add another search.")
             return
         self.running = True
+        self._sync_picks()
         self.started = time.time()
         self.stop_btn.configure(state="normal")
         self.tabs.set("Activity")
@@ -821,12 +1148,22 @@ class App(*_Base):
             return
         self.current = item
         item["status"] = "Running"
+        job: Job = item["job"]
+        if job.preview:
+            if not job.exclude:          # a new preview; "more like my picks" adds to the old one
+                self._clear_gallery()
+            self.pick_job = job
+            self.gal_title.configure(text="Pick the ones you want")
+        elif self.cands or self._lib_token is not None:   # replaces previews / a library view
+            self._clear_gallery()
+            self._lib_token = None
         self._render_queue()
         self.counters = {k: 0 for k in KINDS}
         self._update_chips()
         self.bar_progress.configure(mode="indeterminate")
         self.bar_progress.start()
         self.status.configure(text=f"Working on “{item['query']}”…")
+        self._remote_sync(running=True, query=job.query, phase="Starting…", done=0, total=job.total)
         self.log("─" * 50)
         self.worker = Worker(item["job"], self.events)
         threading.Thread(target=self.worker.run, daemon=True).start()
@@ -840,21 +1177,26 @@ class App(*_Base):
 
     def _finish(self):
         self.running = False
+        self._remote_sync(running=False, phase="")
         self.bar_progress.stop()
         self.bar_progress.configure(mode="determinate")
         self.stop_btn.configure(state="disabled")
         self._update_go()
+        self._sync_picks()
         secs = time.time() - self.started
         self.elapsed.configure(text=f"{secs:.0f}s")
         self.bell()
         self._save_settings()
+        self._index_library()
 
     def _on_event(self, ev: Event):
         if ev.type == "log":
             self.log(ev.text, ev.level)
         elif ev.type == "phase":
             self.status.configure(text=ev.text)
+            self._remote_sync(phase=ev.text)
         elif ev.type == "progress":
+            self._remote_sync(done=ev.done, total=ev.total)
             if ev.total:
                 if self.bar_progress.cget("mode") == "indeterminate":
                     self.bar_progress.stop()
@@ -864,12 +1206,33 @@ class App(*_Base):
             self.counters[ev.kind] += 1
             self._update_chips()
             self._add_tile(ev)
+        elif ev.type == "candidate":
+            self._add_candidate(ev)
+        elif ev.type == "done" and ev.preview:
+            n = sum(ev.saved.values())
+            if self.current:
+                self.current["status"] = "Your pick" if n else "No results"
+            self._render_queue()
+            self.status.configure(
+                text=f"{n} to choose from. Click the ones you want, then “Download picked”."
+                if n else "Nothing to show. The Activity tab says why.")
+            self.bar_progress.set(1 if n else 0)
+            self._finish()               # the queue waits here until you've picked
         elif ev.type == "done":
             item = self.current
             stopped = ev.level == "warning"
             n = sum(ev.saved.values())
             if item:
-                item["status"] = "Stopped" if stopped else ("Done" if n else "No results")
+                name = item["job"].query
+                self._remote_sync(finished=self.remote.state["finished"] + 1,
+                                  last=f"“{name}”: {n} saved" if n else f"“{name}”: nothing found")
+            followed = bool(item and item.get("follow"))
+            if item:
+                item["status"] = ("Stopped" if stopped else "Done" if n
+                                  else "Nothing new" if followed else "No results")
+            if followed and not stopped:
+                self.lib.follow_checked(item["follow"], n)
+                self._render_follows()
             self._render_queue()
             if stopped:
                 self.status.configure(text=f"Stopped. {n} files saved.")
@@ -878,7 +1241,8 @@ class App(*_Base):
                 self._next()
             else:
                 self.status.configure(text=f"Done! {n} files saved. Click “Open folder” to see them."
-                                      if n else "Finished, but nothing matched. Try looser settings.")
+                                      if n else "Nothing new in what you follow." if followed
+                                      else "Finished, but nothing was saved. The Activity tab says why.")
                 self.bar_progress.set(1 if n else 0)
                 self._finish()
 
@@ -899,27 +1263,112 @@ class App(*_Base):
         self.after(60, self._pump)
 
     # ── gallery ─────────────────────────────────────────────────────────
+    @staticmethod
+    def _tile_image(path: str, kind: str) -> Image.Image:
+        """Square thumbnail of a downloaded file (a play symbol for videos)."""
+        from PIL import ImageOps
+        im = None
+        try:
+            if kind != "video":
+                im = Image.open(path)
+                im.draft("RGB", (TILE * 2, TILE * 2))
+                im = im.convert("RGB")
+        except Exception:
+            im = None
+        if im is None:
+            im = Image.new("RGB", (TILE, TILE), (40, 32, 64))
+            d = ImageDraw.Draw(im)
+            c = TILE // 2
+            d.polygon([(c - 14, c - 18), (c - 14, c + 18), (c + 18, c)], fill=(255, 255, 255))
+        return ImageOps.fit(im, (TILE, TILE), Image.Resampling.LANCZOS)
+
     def _add_tile(self, ev: Event):
         def load():
-            im = None
-            try:
-                if ev.kind != "video":
-                    im = Image.open(ev.path)
-                    im.draft("RGB", (TILE * 2, TILE * 2))
-                    im = im.convert("RGB")
-            except Exception:
-                im = None
-            if im is None:
-                im = Image.new("RGB", (TILE, TILE), (40, 32, 64))
-                d = ImageDraw.Draw(im)
-                c = TILE // 2
-                d.polygon([(c - 14, c - 18), (c - 14, c + 18), (c + 18, c)], fill=(255, 255, 255))
-            from PIL import ImageOps
-            im = ImageOps.fit(im, (TILE, TILE), Image.Resampling.LANCZOS)
+            im = self._tile_image(ev.path, ev.kind)
             self.ui_q.put(lambda: self._place_tile(ev, im))
         self.thumbs.submit(load)
 
-    def _place_tile(self, ev: Event, im: Image.Image):
+    # ── library ─────────────────────────────────────────────────────────
+    def _smart_on(self) -> bool:
+        """Is smart matching switched on? (main thread only: reads a Tk variable)"""
+        return bool(self.smart_ok and self.smart.get())
+
+    @staticmethod
+    def _smart_clip(on: bool):
+        """The smart model if it is switched on and already downloaded (else None)."""
+        from . import smart
+        return smart.get() if on and smart.installed() else None
+
+    def show_library(self, text: str = ""):
+        """Fill the gallery with downloads matching *text* (all recent ones if empty)."""
+        if self.running:
+            self.status.configure(text="Search your downloads once the current run is finished.")
+            return
+        text = text.strip()
+        self._clear_gallery()
+        self.pick_job = None
+        self.gal_title.configure(text=f"Your downloads: “{text}”" if text else "Your downloads")
+        token = self._lib_token = object()
+        smart_on = self._smart_on()
+
+        def say(msg):
+            self.ui_q.put(lambda: token is self._lib_token and self.status.configure(text=msg))
+
+        def show(items):
+            for it in items:      # in order, best first
+                im = self._tile_image(it.path, it.kind)
+                ev = Event("saved", kind=it.kind, path=it.path, pin=it.pin, score=it.score,
+                           origin=it.query)
+                self.ui_q.put(lambda ev=ev, im=im: token is self._lib_token
+                              and self._place_tile(ev, im, append=True))
+
+        def work():
+            # matches by word come straight away; matches by meaning follow once
+            # the smart model is loaded (a few seconds the first time)
+            items = self.lib.search(text, 60)
+            show(items)
+            if text and smart_on:
+                if items:
+                    say(f"{len(items)} of your downloads mention “{text}”. Looking for more…")
+                else:
+                    say(f"Looking through your downloads for “{text}”…")
+                shown = {it.path for it in items}
+                more = [it for it in self.lib.search(text, 60, clip=self._smart_clip(True))
+                        if it.path not in shown]
+                show(more)
+                items = items + more
+            if not items:
+                say("Nothing in your downloads matches that." if text
+                    else "No downloads recorded yet.")
+            else:
+                say(f"{len(items)} of your downloads" + (f" match “{text}”." if text else "."))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _index_library(self):
+        """Let the smart model look at downloads it hasn't seen, so they can be
+        found by meaning. Runs quietly after each run."""
+        if self.indexing or not self._smart_on():
+            return
+
+        def work():
+            try:
+                clip = self._smart_clip(True)
+                if clip is None:
+                    return
+                from .matching import load
+                for path, _kind in self.lib.missing_embeddings(300):
+                    if self.running or self.closing:
+                        return     # don't compete with a download for the CPU
+                    try:
+                        self.lib.set_embedding(path, clip.image(load(path)))
+                    except Exception:
+                        self.lib.forget(path) if not os.path.exists(path) else None
+            finally:
+                self.indexing = False
+        self.indexing = True
+        threading.Thread(target=work, daemon=True).start()
+
+    def _place_tile(self, ev: Event, im: Image.Image, append: bool = False):
         if self.empty.winfo_exists():
             self.empty.destroy()
         img = ctk.CTkImage(im, im, size=(TILE, TILE))
@@ -930,7 +1379,18 @@ class App(*_Base):
         cap = f"{KIND_ICON[ev.kind]}"
         if ev.score is not None:
             cap += f"  {ev.score:.0f}% match"
-        ctk.CTkLabel(tile, text=cap, font=font(11), text_color=MUTED, height=20).pack(pady=(0, 3))
+        ctk.CTkLabel(tile, text=cap, font=font(11), text_color=MUTED, height=20).pack()
+        if ev.pin is not None:
+            ctk.CTkButton(tile, text="More like this", height=22, width=TILE, corner_radius=8,
+                          font=font(11), fg_color="transparent", hover_color=BORDER,
+                          text_color=TEXT, command=lambda: self.more_like(ev)).pack(
+                padx=4, pady=(0, 4))
+        if append:
+            self.tiles.append(tile)
+            self.tile_images.append(img)
+            i = len(self.tiles) - 1
+            tile.grid(row=i // self.cols, column=i % self.cols, padx=5, pady=5)
+            return
         self.tiles.insert(0, tile)
         self.tile_images.insert(0, img)
         if len(self.tiles) > 150:
@@ -938,7 +1398,154 @@ class App(*_Base):
             self.tile_images.pop()
         self._regrid()
 
+    # ── picking before downloading ──────────────────────────────────────
+    def _clear_gallery(self):
+        for t in self.tiles:
+            t.destroy()
+        self.tiles.clear()
+        self.tile_images.clear()
+        self.cands.clear()
+        if self.empty.winfo_exists():
+            self.empty.destroy()
+        self.gal_title.configure(text="Downloaded")
+        self._sync_picks()
+
+    def _add_candidate(self, ev: Event):
+        def load():
+            import io
+
+            from PIL import ImageOps
+            try:
+                im = Image.open(io.BytesIO(ev.data))
+                im.seek(0)
+                im = ImageOps.fit(im.convert("RGB"), (TILE, TILE), Image.Resampling.LANCZOS)
+            except Exception:
+                im = Image.new("RGB", (TILE, TILE), (40, 32, 64))
+            self.ui_q.put(lambda: self._place_candidate(ev, im))
+        self.thumbs.submit(load)
+
+    def _place_candidate(self, ev: Event, im: Image.Image):
+        if self.pick_job is None:
+            return
+        if self.empty.winfo_exists():
+            self.empty.destroy()
+        img = ctk.CTkImage(im, im, size=(TILE, TILE))
+        tile = ctk.CTkFrame(self.gallery, fg_color=CARD_2, corner_radius=10, border_width=2,
+                            border_color=CARD_2)
+        pic = ctk.CTkLabel(tile, image=img, text="", cursor="hand2")
+        pic.pack(padx=4, pady=(4, 0))
+        cap = ctk.CTkLabel(tile, text="", font=font(11), text_color=MUTED, height=20,
+                           cursor="hand2")
+        cap.pack(pady=(0, 3))
+        cand = {"ev": ev, "tile": tile, "cap": cap, "picked": False}
+        for w in (tile, pic, cap):
+            w.bind("<Button-1>", lambda _e, c=cand: self._toggle_pick(c))
+        self.cands.append(cand)
+        self.tiles.append(tile)          # added at the end: tiles must not jump while you click
+        self.tile_images.append(img)
+        i = len(self.tiles) - 1
+        tile.grid(row=i // self.cols, column=i % self.cols, padx=5, pady=5)
+        self._paint_pick(cand)
+        self._sync_picks()
+
+    def _paint_pick(self, cand: dict):
+        ev = cand["ev"]
+        if cand["picked"]:
+            cand["tile"].configure(border_color=ACCENT)
+            cand["cap"].configure(text="✓ picked", text_color=ACCENT)
+        else:
+            text = KIND_ICON[ev.kind] + (f"  {ev.score:.0f}% match" if ev.score is not None else "")
+            cand["tile"].configure(border_color=CARD_2)
+            cand["cap"].configure(text=text, text_color=MUTED)
+
+    def _toggle_pick(self, cand: dict):
+        cand["picked"] = not cand["picked"]
+        self._paint_pick(cand)
+        self._sync_picks()
+
+    def _pick_all(self, state: bool):
+        for c in self.cands:
+            if c["picked"] != state:
+                c["picked"] = state
+                self._paint_pick(c)
+        self._sync_picks()
+
+    def _sync_picks(self):
+        if not self.cands:
+            self.pick_bar.pack_forget()
+            self.lib_search.pack(side="right")
+            return
+        n = sum(c["picked"] for c in self.cands)
+        self.lib_search.pack_forget()
+        self.pick_bar.pack(side="right")
+        self.pick_go.configure(text=f"Download picked ({n})",
+                               state="normal" if n and not self.running else "disabled")
+        can_learn = bool(n) and self.smart_ok and self.smart.get() and not self.running
+        self.pick_more.configure(state="normal" if can_learn else "disabled")
+
+    def _queue_next(self, item: dict):
+        """Put *item* ahead of everything still waiting, and run the queue."""
+        at = next((i for i, it in enumerate(self.queue_items) if it["status"] == "Waiting"),
+                  len(self.queue_items))
+        self.queue_items.insert(at, item)
+        self._render_queue()
+        self._begin()
+
+    def download_picked(self):
+        picked = [c["ev"] for c in self.cands if c["picked"]]
+        base = self.pick_job
+        if not picked or base is None or self.running:
+            return
+        base.scores = {e.pin.id: e.score for e in picked if e.score is not None}
+        job = picks_job([e.pin for e in picked], base)
+        self._queue_next({"job": job, "query": base.query, "folder": base.out_dir,
+                          "status": "Waiting"})
+
+    def more_like_picks(self):
+        """Another round of previews, steered by what was picked and passed over."""
+        base = self.pick_job
+        picked = [c for c in self.cands if c["picked"]]
+        if not picked or base is None or self.running:
+            return
+        passed = [c for c in self.cands if not c["picked"]]
+        match = self._match_settings()
+        match.examples = [c["ev"].data for c in picked][:16]
+        match.rejects = [c["ev"].data for c in passed][:32]
+        shown = {c["ev"].pin.id for c in self.cands} | set(base.exclude)
+        for c in passed:                 # keep the picks on screen, drop the rest
+            i = self.tiles.index(c["tile"])
+            self.tiles.pop(i).destroy()
+            self.tile_images.pop(i)
+        self.cands = picked
+        self._regrid()
+        job = Job(query=base.query, out_dir=base.out_dir, counts=dict(base.counts), match=match,
+                  threads=base.threads, preview=True, exclude=shown, origin=base.origin,
+                  seed=base.seed, library=base.library, skip_owned=base.skip_owned,
+                  min_side=base.min_side, shape=base.shape)
+        self._queue_next({"job": job, "query": f"More like my picks: {base.query}",
+                          "folder": base.out_dir, "status": "Waiting"})
+
+    def more_like(self, ev: Event):
+        """Queue a search for pins that look like one already downloaded."""
+        counts = {k: r.value for k, r in self.rows.items()}
+        if not any(counts.values()):
+            counts["image"] = 30
+        base = Job(query=ev.origin, out_dir=os.path.dirname(ev.path), counts=counts,
+                   match=self._match_settings(), threads=int(self.threads.get()),
+                   library=self.lib, skip_owned=self.skip_owned.get(), **self._quality())
+        job = similar_job(ev.pin, ev.path, base, ev.origin)
+        self.queue_items.append({"job": job, "query": f"Like: {job.query}",
+                                 "folder": job.out_dir, "status": "Waiting"})
+        self._render_queue()
+        if self.running:
+            self.status.configure(text="Queued: more like that one. It runs after the current search.")
+        self._update_go()
+        self._begin()
+
     def _regrid(self):
+        width = self.gallery.winfo_width()
+        if width > 1:  # 1 = not laid out yet
+            self.cols = max(2, (width - 30) // (TILE + 18))
         for i, t in enumerate(self.tiles):
             t.grid(row=i // self.cols, column=i % self.cols, padx=5, pady=5)
 
@@ -961,7 +1568,7 @@ class App(*_Base):
         folder = self._phone_folder()
         os.makedirs(folder, exist_ok=True)
         try:
-            self.phone = PhoneServer(folder, self.cfg["phone_token"])
+            self.phone = PhoneServer(folder, self.cfg["phone_token"], control=self.remote)
             self.phone.start()
         except OSError as exc:
             self.log(f"Couldn't start phone sharing: {exc}", "error")
@@ -1089,10 +1696,15 @@ class App(*_Base):
     # ── persistence ─────────────────────────────────────────────────────
     def _save_settings(self):
         self.cfg.update({
+            "pick_first": self.pick_first.get(),
+            "skip_owned": self.skip_owned.get(),
+            **self._quality(),
             "folder": self.folder.get(), "subfolders": self.subfolders.get(),
             "threads": int(self.threads.get()), "look": self.look.get(),
             "colors": self.colors.get(), "color_tolerance": round(self.tolerance.get()),
             "closeness": round(self.closeness.get()),
+            "smart": self.smart.get() if self.smart_ok else self.cfg.get("smart", True),
+            "describe": self.describe.get().strip(),
             "palette": self.palette.entries() if self.palette else [],
             "palette_edited": self.palette_edited,
             **{k: r.value for k, r in self.rows.items()},
@@ -1100,6 +1712,7 @@ class App(*_Base):
         settings.save(self.cfg)
 
     def _close(self):
+        self.closing = True
         if self.worker:
             self.worker.stop()
         self._phone_stop()
@@ -1109,5 +1722,11 @@ class App(*_Base):
 
 
 def main():
+    try:  # own taskbar identity, so Windows shows our icon instead of Python's
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "IamOumarIbrahim.PinterestMassDownloader")
+    except (AttributeError, OSError):
+        pass
     app = App()
     app.mainloop()
